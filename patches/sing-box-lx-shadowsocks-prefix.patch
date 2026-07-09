@@ -1,13 +1,15 @@
 diff --git a/go.mod b/go.mod
-index b2d5c6f..d082dcf 100644
+index b2d5c6f..d2055a0 100644
 --- a/go.mod
 +++ b/go.mod
-@@ -193,4 +193,7 @@ require (
+@@ -193,4 +193,9 @@ require (
  // for CI/release once validated against a live AWG2 server. See SPECS/003.
  replace github.com/sagernet/wireguard-go => ./submodules/wireguard-go
  
-+// local patch: Shadowsocks salt-prefix (Outline "prefix" disguise)
-+replace github.com/sagernet/sing-shadowsocks => ../sing-shadowsocks-lx
++// local patch: Shadowsocks salt-prefix (Outline "prefix" disguise). sing-box builds the method
++// for AEAD ciphers (chacha20-ietf-poly1305, aes-*-gcm) from sing-shadowsocks2, so the SetSaltPrefix
++// patch must live in v2 - patching the legacy sing-shadowsocks module has no effect.
++replace github.com/sagernet/sing-shadowsocks2 => ../sing-shadowsocks2-lx
 +
  // lx:end awg
 diff --git a/option/shadowsocks.go b/option/shadowsocks.go
@@ -21,7 +23,7 @@ index 7cb656f..19eb2d8 100644
 +	Prefix        string                    `json:"prefix,omitempty"` // Outline salt-prefix disguise (base64)
  }
 diff --git a/protocol/shadowsocks/outbound.go b/protocol/shadowsocks/outbound.go
-index 9b9d925..32dd7d1 100644
+index 9b9d925..85203bb 100644
 --- a/protocol/shadowsocks/outbound.go
 +++ b/protocol/shadowsocks/outbound.go
 @@ -2,6 +2,7 @@ package shadowsocks
@@ -32,7 +34,7 @@ index 9b9d925..32dd7d1 100644
  	"net"
  
  	"github.com/sagernet/sing-box/adapter"
-@@ -44,6 +45,15 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
+@@ -44,6 +45,17 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
  	if err != nil {
  		return nil, err
  	}
@@ -41,9 +43,11 @@ index 9b9d925..32dd7d1 100644
 +		if decodeErr != nil {
 +			return nil, E.Cause(decodeErr, "decode shadowsocks prefix")
 +		}
-+		if setter, ok := method.(interface{ SetSaltPrefix([]byte) }); ok {
-+			setter.SetSaltPrefix(prefix)
++		setter, ok := method.(interface{ SetSaltPrefix([]byte) })
++		if !ok {
++			return nil, E.New("shadowsocks method ", options.Method, " does not support a salt prefix")
 +		}
++		setter.SetSaltPrefix(prefix)
 +	}
  	outboundDialer, err := dialer.New(ctx, options.DialerOptions, options.ServerIsDomain())
  	if err != nil {

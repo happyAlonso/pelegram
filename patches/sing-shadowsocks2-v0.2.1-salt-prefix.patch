@@ -1,0 +1,32 @@
+--- a/shadowaead/method.go
++++ b/shadowaead/method.go
+@@ -38,6 +38,15 @@
+ 	keySaltLength int
+ 	constructor   func(key []byte) (cipher.AEAD, error)
+ 	key           []byte
++	saltPrefix    []byte
++}
++
++// SetSaltPrefix makes the client request salt begin with the given bytes (the Outline "prefix"
++// disguise, so the first bytes on the wire mimic a TLS record). A Shadowsocks server derives the
++// key from whatever salt it reads, so this changes only what an on-path DPI sees, not the protocol.
++// Ignored when the prefix is empty or not shorter than the salt.
++func (m *Method) SetSaltPrefix(prefix []byte) {
++	m.saltPrefix = prefix
+ }
+ 
+ func NewMethod(ctx context.Context, methodName string, options C.MethodOptions) (*Method, error) {
+@@ -121,7 +130,12 @@
+ 
+ func (c *clientConn) writeRequest(payload []byte) error {
+ 	requestBuffer := buf.New()
+-	requestBuffer.WriteRandom(c.method.keySaltLength)
++	if n := len(c.method.saltPrefix); n > 0 && n < c.method.keySaltLength {
++		common.Must1(requestBuffer.Write(c.method.saltPrefix))
++		requestBuffer.WriteRandom(c.method.keySaltLength - n)
++	} else {
++		requestBuffer.WriteRandom(c.method.keySaltLength)
++	}
+ 	key := make([]byte, c.method.keySaltLength)
+ 	legacykey.Kdf(c.method.key, requestBuffer.Bytes(), key)
+ 	writeCipher, err := c.method.constructor(key)
