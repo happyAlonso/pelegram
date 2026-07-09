@@ -16,3 +16,11 @@ buildscript {
 repositories {
     google()
 }
+
+// Make the local sing-box AAR resolvable from every module (the app module resolves the
+// runtime classpath and needs to see :libbox-lx: that TMessagesProj depends on).
+allprojects {
+    repositories {
+        flatDir { dirs "${rootProject.projectDir}/TMessagesProj/libs" }
+    }
+}
