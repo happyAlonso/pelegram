@@ -132,7 +132,7 @@ public class SingBoxConfigBuilder {
         if (hash >= 0) {
             s = s.substring(0, hash);
         }
-        String method, password, host, pluginParam = null;
+        String method, password, host, pluginParam = null, prefixParam = null;
         int port;
         int at = s.indexOf('@');
         if (at >= 0) {
@@ -143,7 +143,9 @@ public class SingBoxConfigBuilder {
             String rest = s.substring(at + 1);
             int q = rest.indexOf('?');
             if (q >= 0) {
-                pluginParam = queryValue(rest.substring(q + 1), "plugin");
+                String query = rest.substring(q + 1);
+                pluginParam = queryValue(query, "plugin");
+                prefixParam = queryValue(query, "prefix");
                 rest = rest.substring(0, q);
             }
             int slash = rest.indexOf('/'); // Outline keys have a trailing /path before the query
@@ -183,7 +185,33 @@ public class SingBoxConfigBuilder {
                 o.put("plugin", p);
             }
         }
+        if (!TextUtils.isEmpty(prefixParam)) {
+            // Outline "prefix" (TLS-shaped salt disguise). Keys double-URL-encode it (%2516 -> %16
+            // -> byte 0x16), so URL-decode once then percent-decode to raw bytes, base64 for the core.
+            byte[] pfx = percentToBytes(URLDecoder.decode(prefixParam, StandardCharsets.UTF_8.name()));
+            if (pfx.length > 0) {
+                o.put("prefix", Base64.encodeToString(pfx, Base64.NO_WRAP));
+            }
+        }
         return o;
+    }
+
+    private static byte[] percentToBytes(String s) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        for (int i = 0; i < s.length(); ) {
+            char ch = s.charAt(i);
+            if (ch == '%' && i + 2 < s.length()) {
+                try {
+                    out.write(Integer.parseInt(s.substring(i + 1, i + 3), 16));
+                    i += 3;
+                    continue;
+                } catch (NumberFormatException ignored) {
+                }
+            }
+            out.write(ch & 0xff);
+            i++;
+        }
+        return out.toByteArray();
     }
 
     private static byte[] b64decode(String in) {

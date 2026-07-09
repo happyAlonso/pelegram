@@ -21,7 +21,7 @@ need a separate VPN client just to use Telegram.
 - **Paste a VPN key instead of a proxy.** Supported key types:
   - `vless://` - VLESS, including REALITY and XHTTP
   - `hysteria2://` - Hysteria2 (QUIC, with Salamander obfuscation)
-  - `ss://` - Shadowsocks / Outline (experimental - see the note below; not yet usable where DPI blocks Shadowsocks)
+  - `ss://` - Shadowsocks / Outline (applies Outline's `prefix` disguise)
   - AmneziaWG 2.0 - paste the `vpn://...` key exported by the **AmneziaVPN** app (the official Amnezia client), or a raw `awg-quick` `[Interface]` / `[Peer]` config
 - **App-scoped.** Only Telegram's own traffic goes through the tunnel. There is no system-wide VPN,
   no `VpnService`, and no extra Android permission. The core exposes a local SOCKS5 endpoint and the
@@ -48,11 +48,10 @@ hysteria2://<auth>@<host>:<port>?obfs=salamander&obfs-password=<pw>&sni=<sni>&in
 ss://<base64(method:password)>@<host>:<port>#name
 ```
 
-**Shadowsocks / Outline (experimental - does not work yet under DPI):** `ss://` keys parse and
-connect on unrestricted networks, but they do **not** yet work where Shadowsocks is blocked by DPI.
-Outline's `prefix` disguise (which makes the first bytes look like TLS) is not applied yet, so the
-flow is detected and reset. Prefix support is planned - Outline keys will work under DPI in a future
-version. For now, use the VLESS, Hysteria2 or AmneziaWG keys, which carry proper obfuscation.
+**Shadowsocks / Outline:** paste the `ss://` access key. pelegram applies Outline's `prefix`
+disguise - the Shadowsocks salt is shaped so the first bytes on the wire look like a TLS
+ClientHello - so Outline keys get through DPI that blocks plain Shadowsocks. (The Shadowsocks core
+is patched for this; a standard sing-box build would send a random salt and be blocked.)
 
 **AmneziaWG** connections are added from the **AmneziaVPN** app - the official Amnezia client
 (https://amnezia.org), not "AmneziaWG", "Amnezia WG" or any other app. In AmneziaVPN, share/export

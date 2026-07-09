@@ -20,7 +20,7 @@
     <string name="VpnNameHint">Name (optional)</string>
     <string name="VpnAddInfo">Paste a vpn:// (AmneziaWG), vless://, hysteria2:// or ss:// (Shadowsocks/Outline) link, or an AmneziaWG config.</string>
     <string name="VpnSupportedProtocols">Supported protocols</string>
-    <string name="VpnSupportedProtocolsInfo">pelegram routes Telegram through an embedded tunnel. Supported:\n\n- VLESS (incl. REALITY, XHTTP)\n- Hysteria2 (QUIC, obfs)\n- AmneziaWG 2.0 (vpn:// backups and awg configs)\n- Shadowsocks / Outline (ss:// - experimental, does not work under DPI yet)</string>
+    <string name="VpnSupportedProtocolsInfo">pelegram routes Telegram through an embedded tunnel. Supported:\n\n- VLESS (incl. REALITY, XHTTP)\n- Hysteria2 (QUIC, obfs)\n- AmneziaWG 2.0 (vpn:// backups and awg configs)\n- Shadowsocks / Outline (ss://, with prefix disguise)</string>
     <string name="VpnDeleteTitle">Delete connection</string>
     <string name="VpnDeleteText">Delete this VPN connection?</string>
     <string name="VpnInvalidKey">Could not read this VPN key</string>
