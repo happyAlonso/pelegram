@@ -21,9 +21,8 @@ import java.util.zip.Inflater;
  * Supported schemes: hysteria2:// , vless:// , and AmneziaWG (awg-quick .conf text).
  *
  * NOTE (interop risks, to validate on-device against the real finn/amnezia servers):
- *  - VLESS: the finn keys use Xray's xhttp + mode=packet-up. sing-box's xhttp transport is
- *    mapped here, but mode/packet-up has no direct sing-box equivalent; the Hysteria2 key is
- *    the proven-safe path. Confirm the vless handshake before relying on it.
+ *  - VLESS: the xhttp transport (incl. mode=packet-up and host) is mapped from the URL. Verified
+ *    against the finn REALITY+xhttp server. The `mode` must match the server or the handshake 404s.
  *  - AmneziaWG: field mapping follows the lx fork schema (jc/jmin/jmax, s1-s4, h1-h4, i1-i5).
  */
 public class SingBoxConfigBuilder {
@@ -83,6 +82,8 @@ public class SingBoxConfigBuilder {
             return parseHysteria2(key);
         } else if (lower.startsWith("vless://")) {
             return parseVless(key);
+        } else if (lower.startsWith("ss://")) {
+            return parseShadowsocks(key);
         } else if (lower.contains("[interface]") || lower.startsWith("wg://") || lower.startsWith("awg://")) {
             return parseAmneziaWg(key);
         }
@@ -121,6 +122,88 @@ public class SingBoxConfigBuilder {
         }
         o.put("tls", tls);
         return o;
+    }
+
+    // Shadowsocks / Outline. SIP002: ss://base64(method:password)@host:port[?plugin=..]#name
+    // Legacy: ss://base64(method:password@host:port)#name
+    private static JSONObject parseShadowsocks(String key) throws Exception {
+        String s = key.substring("ss://".length());
+        int hash = s.indexOf('#');
+        if (hash >= 0) {
+            s = s.substring(0, hash);
+        }
+        String method, password, host, pluginParam = null;
+        int port;
+        int at = s.indexOf('@');
+        if (at >= 0) {
+            String userinfo = new String(b64decode(s.substring(0, at)), StandardCharsets.UTF_8);
+            int c = userinfo.indexOf(':');
+            method = userinfo.substring(0, c);
+            password = userinfo.substring(c + 1);
+            String rest = s.substring(at + 1);
+            int q = rest.indexOf('?');
+            if (q >= 0) {
+                pluginParam = queryValue(rest.substring(q + 1), "plugin");
+                rest = rest.substring(0, q);
+            }
+            int slash = rest.indexOf('/'); // Outline keys have a trailing /path before the query
+            if (slash >= 0) {
+                rest = rest.substring(0, slash);
+            }
+            int cc = rest.lastIndexOf(':');
+            host = rest.substring(0, cc);
+            port = Integer.parseInt(rest.substring(cc + 1));
+        } else {
+            // whole thing is base64(method:password@host:port)
+            String decoded = new String(b64decode(s), StandardCharsets.UTF_8);
+            int c = decoded.indexOf(':');
+            int a = decoded.indexOf('@');
+            method = decoded.substring(0, c);
+            password = decoded.substring(c + 1, a);
+            String hostport = decoded.substring(a + 1);
+            int cc = hostport.lastIndexOf(':');
+            host = hostport.substring(0, cc);
+            port = Integer.parseInt(hostport.substring(cc + 1));
+        }
+
+        JSONObject o = new JSONObject();
+        o.put("type", "shadowsocks");
+        o.put("tag", TAG_PROXY);
+        o.put("server", host);
+        o.put("server_port", port);
+        o.put("method", method);
+        o.put("password", password);
+        if (!TextUtils.isEmpty(pluginParam)) {
+            String p = decode(pluginParam);
+            int semi = p.indexOf(';');
+            if (semi >= 0) {
+                o.put("plugin", p.substring(0, semi));
+                o.put("plugin_opts", p.substring(semi + 1));
+            } else {
+                o.put("plugin", p);
+            }
+        }
+        return o;
+    }
+
+    private static byte[] b64decode(String in) {
+        String t = in.replace('-', '+').replace('_', '/');
+        switch (t.length() % 4) {
+            case 2: t += "=="; break;
+            case 3: t += "="; break;
+            default: break;
+        }
+        return Base64.decode(t, Base64.NO_WRAP);
+    }
+
+    private static String queryValue(String query, String key) {
+        for (String kv : query.split("&")) {
+            int e = kv.indexOf('=');
+            if (e > 0 && kv.substring(0, e).equals(key)) {
+                return kv.substring(e + 1);
+            }
+        }
+        return null;
     }
 
     // vless://<uuid>@<host>:<port>?type=xhttp&path=..&mode=packet-up&security=reality&pbk=..&fp=chrome&sni=..&sid=..#name
@@ -164,7 +247,8 @@ public class SingBoxConfigBuilder {
             o.put("tls", tls);
         }
 
-        // Transport (xhttp / ws / grpc). NOTE: Xray's mode=packet-up has no sing-box equivalent.
+        // Transport (xhttp / ws / grpc). For xhttp the `mode` (packet-up / stream-one / ...) MUST
+        // match the server; the wrong mode makes the handshake 404. `host` is optional.
         String type = uri.getQueryParameter("type");
         if (!TextUtils.isEmpty(type) && !"tcp".equals(type)) {
             JSONObject transport = new JSONObject();
@@ -172,6 +256,14 @@ public class SingBoxConfigBuilder {
             String path = uri.getQueryParameter("path");
             if (!TextUtils.isEmpty(path)) {
                 transport.put("path", decode(path));
+            }
+            String mode = uri.getQueryParameter("mode");
+            if (!TextUtils.isEmpty(mode)) {
+                transport.put("mode", mode);
+            }
+            String host = uri.getQueryParameter("host");
+            if (!TextUtils.isEmpty(host)) {
+                transport.put("host", host);
             }
             o.put("transport", transport);
         }

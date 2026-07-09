@@ -32,6 +32,7 @@ public class VpnKeyInfo {
                 if ("wireguard".equals(t)) return "AmneziaWG";
                 if ("vless".equals(t)) return "VLESS";
                 if ("hysteria2".equals(t)) return "Hysteria2";
+                if ("shadowsocks".equals(t)) return "Shadowsocks";
             } catch (Exception ignored) {
             }
             return "VPN";

@@ -21,6 +21,7 @@ need a separate VPN client just to use Telegram.
 - **Paste a VPN key instead of a proxy.** Supported key types:
   - `vless://` - VLESS, including REALITY and XHTTP
   - `hysteria2://` - Hysteria2 (QUIC, with Salamander obfuscation)
+  - `ss://` - Shadowsocks / Outline (experimental - see the note below; not yet usable where DPI blocks Shadowsocks)
   - AmneziaWG 2.0 - paste the `vpn://...` key exported by the **AmneziaVPN** app (the official Amnezia client), or a raw `awg-quick` `[Interface]` / `[Peer]` config
 - **App-scoped.** Only Telegram's own traffic goes through the tunnel. There is no system-wide VPN,
   no `VpnService`, and no extra Android permission. The core exposes a local SOCKS5 endpoint and the
@@ -44,7 +45,14 @@ You can also open a supported share link to import a key in one tap.
 ```
 vless://<uuid>@<host>:<port>?type=xhttp&security=reality&pbk=<pubkey>&fp=chrome&sni=<sni>&sid=<shortid>#name
 hysteria2://<auth>@<host>:<port>?obfs=salamander&obfs-password=<pw>&sni=<sni>&insecure=1#name
+ss://<base64(method:password)>@<host>:<port>#name
 ```
+
+**Shadowsocks / Outline (experimental - does not work yet under DPI):** `ss://` keys parse and
+connect on unrestricted networks, but they do **not** yet work where Shadowsocks is blocked by DPI.
+Outline's `prefix` disguise (which makes the first bytes look like TLS) is not applied yet, so the
+flow is detected and reset. Prefix support is planned - Outline keys will work under DPI in a future
+version. For now, use the VLESS, Hysteria2 or AmneziaWG keys, which carry proper obfuscation.
 
 **AmneziaWG** connections are added from the **AmneziaVPN** app - the official Amnezia client
 (https://amnezia.org), not "AmneziaWG", "Amnezia WG" or any other app. In AmneziaVPN, share/export
