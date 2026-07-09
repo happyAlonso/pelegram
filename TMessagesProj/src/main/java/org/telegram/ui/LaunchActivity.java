@@ -104,6 +104,7 @@ import org.telegram.messenger.BotWebViewVibrationEffect;
 import org.telegram.messenger.BuildConfig;
 import org.telegram.messenger.BuildVars;
 import org.telegram.messenger.vpn.SingBoxManager;
+import org.telegram.messenger.vpn.VpnController;
 import org.telegram.messenger.ChannelBoostsController;
 import org.telegram.messenger.ChatObject;
 import org.telegram.messenger.ContactsController;
@@ -8279,8 +8280,13 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
             title = "Updating";
             titleId = R.string.Updating;
         } else if (currentConnectionState == ConnectionsManager.ConnectionStateConnectingToProxy) {
-            title = "ConnectingToProxyWithDots";
-            titleId = R.string.ConnectingToProxyWithDots;
+            if (VpnController.getInstance().isEnabled()) {
+                title = "ConnectingToVpnWithDots";
+                titleId = R.string.ConnectingToVpnWithDots;
+            } else {
+                title = "ConnectingToProxyWithDots";
+                titleId = R.string.ConnectingToProxyWithDots;
+            }
         } else if (currentConnectionState == ConnectionsManager.ConnectionStateConnecting) {
             title = "Connecting";
             titleId = R.string.Connecting;
@@ -8296,6 +8302,13 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
                     if (!mainFragmentsStack.isEmpty()) {
                         lastFragment = mainFragmentsStack.get(mainFragmentsStack.size() - 1);
                     }
+                }
+                if (VpnController.getInstance().isEnabled()) {
+                    if (lastFragment instanceof VpnListActivity || lastFragment instanceof VpnSettingsActivity) {
+                        return;
+                    }
+                    presentFragment(new VpnListActivity());
+                    return;
                 }
                 if (lastFragment instanceof ProxyListActivity || lastFragment instanceof ProxySettingsActivity) {
                     return;

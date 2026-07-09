@@ -1638,6 +1638,8 @@ public class ActionBar extends FrameLayout implements FactorAnimator.Target, The
             final CharSequence textToSet;
             if (titleId == R.string.ConnectingToProxyWithDots) {
                 textToSet = AndroidUtilities.replaceArrows(getString(R.string.TitleSetupProxy), true, dp(8f / 3f), dp(2));
+            } else if (titleId == R.string.ConnectingToVpnWithDots) {
+                textToSet = AndroidUtilities.replaceArrows(getString(R.string.TitleSetupVpn), true, dp(8f / 3f), dp(2));
             } else {
                 textToSet = null;
             }

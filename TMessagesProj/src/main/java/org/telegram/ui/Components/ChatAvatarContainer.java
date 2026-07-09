@@ -1565,7 +1565,7 @@ public class ChatAvatarContainer extends FrameLayout implements NotificationCent
         } else if (currentConnectionState == ConnectionsManager.ConnectionStateUpdating) {
             title = getString(R.string.Updating);
         } else if (currentConnectionState == ConnectionsManager.ConnectionStateConnectingToProxy) {
-            title = getString(R.string.ConnectingToProxy);
+            title = getString(org.telegram.messenger.vpn.VpnController.getInstance().isEnabled() ? R.string.ConnectingToVpn : R.string.ConnectingToProxy);
         }
         if (title == null) {
             if (lastSubtitle != null) {
