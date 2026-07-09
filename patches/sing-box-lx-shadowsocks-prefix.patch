@@ -1,0 +1,50 @@
+diff --git a/go.mod b/go.mod
+index b2d5c6f..d082dcf 100644
+--- a/go.mod
++++ b/go.mod
+@@ -193,4 +193,7 @@ require (
+ // for CI/release once validated against a live AWG2 server. See SPECS/003.
+ replace github.com/sagernet/wireguard-go => ./submodules/wireguard-go
+ 
++// local patch: Shadowsocks salt-prefix (Outline "prefix" disguise)
++replace github.com/sagernet/sing-shadowsocks => ../sing-shadowsocks-lx
++
+ // lx:end awg
+diff --git a/option/shadowsocks.go b/option/shadowsocks.go
+index 7cb656f..19eb2d8 100644
+--- a/option/shadowsocks.go
++++ b/option/shadowsocks.go
+@@ -32,4 +32,5 @@ type ShadowsocksOutboundOptions struct {
+ 	Network       NetworkList               `json:"network,omitempty"`
+ 	UDPOverTCP    *UDPOverTCPOptions        `json:"udp_over_tcp,omitempty"`
+ 	Multiplex     *OutboundMultiplexOptions `json:"multiplex,omitempty"`
++	Prefix        string                    `json:"prefix,omitempty"` // Outline salt-prefix disguise (base64)
+ }
+diff --git a/protocol/shadowsocks/outbound.go b/protocol/shadowsocks/outbound.go
+index 9b9d925..32dd7d1 100644
+--- a/protocol/shadowsocks/outbound.go
++++ b/protocol/shadowsocks/outbound.go
+@@ -2,6 +2,7 @@ package shadowsocks
+ 
+ import (
+ 	"context"
++	"encoding/base64"
+ 	"net"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+@@ -44,6 +45,15 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	if options.Prefix != "" {
++		prefix, decodeErr := base64.StdEncoding.DecodeString(options.Prefix)
++		if decodeErr != nil {
++			return nil, E.Cause(decodeErr, "decode shadowsocks prefix")
++		}
++		if setter, ok := method.(interface{ SetSaltPrefix([]byte) }); ok {
++			setter.SetSaltPrefix(prefix)
++		}
++	}
+ 	outboundDialer, err := dialer.New(ctx, options.DialerOptions, options.ServerIsDomain())
+ 	if err != nil {
+ 		return nil, err
