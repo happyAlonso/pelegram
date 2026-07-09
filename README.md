@@ -1,39 +1,100 @@
-## Telegram messenger for Android
+# pelegram
 
-[Telegram](https://telegram.org) is a messaging app with a focus on speed and security. It’s superfast, simple and free.
-This repo contains the official source code for [Telegram App for Android](https://play.google.com/store/apps/details?id=org.telegram.messenger).
+pelegram is a fork of the [Telegram App for Android](https://github.com/DrKLO/Telegram) that adds
+an embedded VPN transport, so you can keep Telegram working on networks where deep packet
+inspection (DPI) blocks the standard MTProto and SOCKS5 proxies.
 
-## Creating your Telegram Application
+Instead of entering a proxy, you paste a modern VPN key (VLESS, Hysteria2, or AmneziaWG). The app
+runs the tunnel itself and routes Telegram through it. Everything else about the client is stock
+Telegram.
 
-We welcome all developers to use our API and source code to create applications on our platform.
-There are several things we require from **all developers** for the moment.
+## Why
 
-1. [**Obtain your own api_id**](https://core.telegram.org/api/obtaining_api_id) for your application.
-2. Please **do not** use the name Telegram for your app — or make sure your users understand that it is unofficial.
-3. Kindly **do not** use our standard logo (white paper plane in a blue circle) as your app's logo.
-3. Please study our [**security guidelines**](https://core.telegram.org/mtproto/security_guidelines) and take good care of your users' data and privacy.
-4. Please remember to publish **your** code too in order to comply with the licences.
+On some networks the censor now fingerprints and blocks the proxy protocols Telegram ships with:
+the MTProto handshake gets throttled by its shape, and SOCKS5 is dropped outright. Obfuscated
+transports that look like ordinary TLS or QUIC (VLESS+REALITY, Hysteria2) or obfuscated WireGuard
+(AmneziaWG) still get through. pelegram brings one of those tunnels inside the app so you do not
+need a separate VPN client just to use Telegram.
 
-### API, Protocol documentation
+## Features
 
-Telegram API manuals: https://core.telegram.org/api
+- **Paste a VPN key instead of a proxy.** Supported key types:
+  - `vless://` - VLESS, including REALITY and XHTTP
+  - `hysteria2://` - Hysteria2 (QUIC, with Salamander obfuscation)
+  - AmneziaWG - an `awg-quick` style `[Interface]` / `[Peer]` config (AmneziaWG 2.0)
+- **App-scoped.** Only Telegram's own traffic goes through the tunnel. There is no system-wide VPN,
+  no `VpnService`, and no extra Android permission. The core exposes a local SOCKS5 endpoint and the
+  app points Telegram's existing proxy layer at it.
+- **Connection status, like proxies.** A VPN key shows whether it is working and its latency, the
+  same way the proxy list does.
+- Powered by an embedded [sing-box](https://sing-box.sagernet.org/) core.
 
-MTproto protocol manuals: https://core.telegram.org/mtproto
+## How to use
 
-### Compilation Guide
+1. Open **Settings -> Data and Storage -> Proxy** (the VPN keys live alongside proxies).
+2. Add a key: paste your `vless://` / `hysteria2://` link, or an AmneziaWG config.
+3. Enable it. The app starts the tunnel and routes Telegram through it. The row shows connecting,
+   then a latency once it is up.
+4. To stop, disable the key. Telegram goes back to a direct connection.
 
-**Note**: In order to support [reproducible builds](https://core.telegram.org/reproducible-builds), this repo contains dummy release.keystore,  google-services.json and filled variables inside BuildVars.java. Before publishing your own APKs please make sure to replace all these files with your own.
+You can also open a supported share link to import a key in one tap.
 
-You will require Android Studio 3.4, Android NDK rev. 20 and Android SDK 8.1
+### Key format examples
 
-1. Download the Telegram source code from https://github.com/DrKLO/Telegram ( git clone https://github.com/DrKLO/Telegram.git )
-2. Copy your release.keystore into TMessagesProj/config
-3. Fill out RELEASE_KEY_PASSWORD, RELEASE_KEY_ALIAS, RELEASE_STORE_PASSWORD in gradle.properties to access your  release.keystore
-4.  Go to https://console.firebase.google.com/, create two android apps with application IDs org.telegram.messenger and org.telegram.messenger.beta, turn on firebase messaging and download google-services.json, which should be copied to the same folder as TMessagesProj.
-5. Open the project in the Studio (note that it should be opened, NOT imported).
-6. Fill out values in TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java – there’s a link for each of the variables showing where and which data to obtain.
-7. You are ready to compile Telegram.
+```
+vless://<uuid>@<host>:<port>?type=xhttp&security=reality&pbk=<pubkey>&fp=chrome&sni=<sni>&sid=<shortid>#name
+hysteria2://<auth>@<host>:<port>?obfs=salamander&obfs-password=<pw>&sni=<sni>&insecure=1#name
+```
 
-### Localization
+AmneziaWG keys are the standard `[Interface]` / `[Peer]` text (with the extra `Jc/Jmin/Jmax`,
+`S1..S4`, `H1..H4` fields) exported by AmneziaVPN.
 
-We moved all translations to https://translations.telegram.org/en/android/. Please use it.
+## Status
+
+- Embedded sing-box core, config parsing, and the connect/disconnect wiring are integrated.
+- Current builds target **arm64-v8a** only.
+- The in-app UI for pasting and managing keys is being finished; the transport and status plumbing
+  are in place.
+
+## Building from source
+
+Requirements: Android SDK (compile SDK 35), NDK `27.2.12479018`, JDK 17, and Go (for building the
+tunnel core). See `VPN_FEATURE_PLAN.md` for the full design and integration notes.
+
+1. **Provide your own api_id / api_hash.** pelegram reads them at build time from a gitignored
+   `secrets/` directory at the repo root so they never land in source control:
+   ```
+   secrets/api_id      # your numeric api_id from https://my.telegram.org
+   secrets/api_hash     # your api_hash
+   ```
+   Get them at https://my.telegram.org. Without this, the build falls back to Telegram's public
+   placeholder values.
+2. **Build the tunnel core** (produces `TMessagesProj/libs/libbox-lx.aar`, arm64-v8a):
+   ```
+   ANDROID_HOME=~/Android/Sdk ./Tools/build-singbox-lx.sh
+   ```
+   A prebuilt `libbox-lx.aar` is committed, so you can skip this unless you want to rebuild the core.
+3. **Point Gradle at your SDK** with a `local.properties` file (`sdk.dir=/path/to/Android/Sdk`).
+4. **Build the APK:**
+   ```
+   ./gradlew :TMessagesProj_App:assembleAfatDebug
+   ```
+
+## Credits and license
+
+pelegram is built on the official [Telegram for Android](https://github.com/DrKLO/Telegram) source
+and is released under the **GNU General Public License v2** (see `LICENSE`). As a fork you must keep
+your source published to comply with the license.
+
+The embedded tunnel uses [sing-box](https://github.com/SagerNet/sing-box) (and the AmneziaWG 2.0
+build from its client fork). Their licenses and notices are retained.
+
+This is an unofficial client. It is not affiliated with or endorsed by Telegram. Do not present it
+as the official Telegram app, and do not reuse Telegram's name or logo in a way that implies it is
+official. Please study Telegram's [security guidelines](https://core.telegram.org/mtproto/security_guidelines)
+and take good care of your users' data and privacy.
+
+### API and protocol documentation
+
+- Telegram API: https://core.telegram.org/api
+- MTProto protocol: https://core.telegram.org/mtproto
