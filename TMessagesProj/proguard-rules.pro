@@ -111,6 +111,11 @@
 -keep class ru.noties.jlatexmath.** { *; }
 -dontwarn org.scilab.forge.jlatexmath.**
 
+# Embedded sing-box (gomobile) core: called across the JNI boundary, so keep it from shrinking.
+-keep class libbox.** { *; }
+-keep class go.** { *; }
+-keep class org.telegram.messenger.vpn.** { *; }
+
 # Use -keep to explicitly keep any other classes shrinking would remove
 -dontoptimize
 -dontobfuscate
