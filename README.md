@@ -21,7 +21,7 @@ need a separate VPN client just to use Telegram.
 - **Paste a VPN key instead of a proxy.** Supported key types:
   - `vless://` - VLESS, including REALITY and XHTTP
   - `hysteria2://` - Hysteria2 (QUIC, with Salamander obfuscation)
-  - AmneziaWG - an `awg-quick` style `[Interface]` / `[Peer]` config (AmneziaWG 2.0)
+  - AmneziaWG 2.0 - paste the `vpn://...` key exported by the **AmneziaVPN** app (the official Amnezia client), or a raw `awg-quick` `[Interface]` / `[Peer]` config
 - **App-scoped.** Only Telegram's own traffic goes through the tunnel. There is no system-wide VPN,
   no `VpnService`, and no extra Android permission. The core exposes a local SOCKS5 endpoint and the
   app points Telegram's existing proxy layer at it.
@@ -32,7 +32,7 @@ need a separate VPN client just to use Telegram.
 ## How to use
 
 1. Open **Settings -> Data and Storage -> Proxy** (the VPN keys live alongside proxies).
-2. Add a key: paste your `vless://` / `hysteria2://` link, or an AmneziaWG config.
+2. Add a key: paste your `vless://` / `hysteria2://` link, or - for AmneziaWG - the `vpn://...` key from the **AmneziaVPN** app.
 3. Enable it. The app starts the tunnel and routes Telegram through it. The row shows connecting,
    then a latency once it is up.
 4. To stop, disable the key. Telegram goes back to a direct connection.
@@ -46,8 +46,10 @@ vless://<uuid>@<host>:<port>?type=xhttp&security=reality&pbk=<pubkey>&fp=chrome&
 hysteria2://<auth>@<host>:<port>?obfs=salamander&obfs-password=<pw>&sni=<sni>&insecure=1#name
 ```
 
-AmneziaWG keys are the standard `[Interface]` / `[Peer]` text (with the extra `Jc/Jmin/Jmax`,
-`S1..S4`, `H1..H4` fields) exported by AmneziaVPN.
+**AmneziaWG** connections are added from the **AmneziaVPN** app - the official Amnezia client
+(https://amnezia.org), not "AmneziaWG", "Amnezia WG" or any other app. In AmneziaVPN, share/export
+the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg-quick`
+`[Interface]` / `[Peer]` config (with the `Jc/Jmin/Jmax`, `S1..S4`, `H1..H4` fields) also works.
 
 ## Status
 
