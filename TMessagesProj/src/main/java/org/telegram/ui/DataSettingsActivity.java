@@ -101,6 +101,10 @@ public class DataSettingsActivity extends BaseFragment {
     @Keep
     private int proxyRow;
     private int proxySection2Row;
+    private int vpnSectionRow;
+    @Keep
+    private int vpnRow;
+    private int vpnSection2Row;
     @Keep
     private int clearDraftsRow;
     private int clearDraftsSectionRow;
@@ -197,6 +201,9 @@ public class DataSettingsActivity extends BaseFragment {
         proxySectionRow = rowCount++;
         proxyRow = rowCount++;
         proxySection2Row = rowCount++;
+        vpnSectionRow = rowCount++;
+        vpnRow = rowCount++;
+        vpnSection2Row = rowCount++;
         clearDraftsRow = rowCount++;
         clearDraftsSectionRow = rowCount++;
 
@@ -550,6 +557,8 @@ public class DataSettingsActivity extends BaseFragment {
                 showDialog(builder.create());
             } else if (position == proxyRow) {
                 presentFragment(new ProxyListActivity());
+            } else if (position == vpnRow) {
+                presentFragment(new VpnListActivity());
             } else if (position == enableStreamRow) {
                 SharedConfig.toggleStreamMedia();
                 TextCheckCell textCheckCell = (TextCheckCell) view;
@@ -715,6 +724,9 @@ public class DataSettingsActivity extends BaseFragment {
                     } else if (position == proxyRow) {
                         textCell.setIcon(0);
                         textCell.setText(LocaleController.getString(R.string.ProxySettings), false);
+                    } else if (position == vpnRow) {
+                        textCell.setIcon(0);
+                        textCell.setText(LocaleController.getString(R.string.VpnSettings), false);
                     } else if (position == resetDownloadRow) {
                         textCell.setIcon(0);
                         textCell.setCanDisable(true);
@@ -739,6 +751,8 @@ public class DataSettingsActivity extends BaseFragment {
                         headerCell.setText(LocaleController.getString(R.string.Calls));
                     } else if (position == proxySectionRow) {
                         headerCell.setText(LocaleController.getString(R.string.Proxy));
+                    } else if (position == vpnSectionRow) {
+                        headerCell.setText(LocaleController.getString(R.string.Vpn));
                     } else if (position == streamSectionRow) {
                         headerCell.setText(LocaleController.getString(R.string.Streaming));
                     } else if (position == autoplayHeaderRow) {
@@ -883,7 +897,7 @@ public class DataSettingsActivity extends BaseFragment {
         }
 
         public boolean isRowEnabled(int position) {
-            return position == mobileRow || position == roamingRow || position == wifiRow || position == storageUsageRow || position == useLessDataForCallsRow || position == dataUsageRow || position == proxyRow || position == clearDraftsRow ||
+            return position == mobileRow || position == roamingRow || position == wifiRow || position == storageUsageRow || position == useLessDataForCallsRow || position == dataUsageRow || position == proxyRow || position == vpnRow || position == clearDraftsRow ||
                     position == enableCacheStreamRow || position == enableStreamRow || position == enableAllStreamRow || position == enableMkvRow || position == quickRepliesRow || position == autoplayVideoRow || position == autoplayGifsRow ||
                     position == storageNumRow || position == saveToGalleryGroupsRow || position == saveToGalleryPeerRow || position == saveToGalleryChannelsRow || position == resetDownloadRow;
         }
@@ -926,9 +940,9 @@ public class DataSettingsActivity extends BaseFragment {
 
         @Override
         public int getItemViewType(int position) {
-            if (position == mediaDownloadSection2Row || position == usageSection2Row || position == callsSection2Row || position == proxySection2Row || position == autoplaySectionRow || position == clearDraftsSectionRow || position == saveToGalleryDividerRow) {
+            if (position == mediaDownloadSection2Row || position == usageSection2Row || position == callsSection2Row || position == proxySection2Row || position == vpnSection2Row || position == autoplaySectionRow || position == clearDraftsSectionRow || position == saveToGalleryDividerRow) {
                 return 0;
-            } else if (position == mediaDownloadSectionRow || position == streamSectionRow || position == callsSectionRow || position == usageSectionRow || position == proxySectionRow || position == autoplayHeaderRow || position == saveToGallerySectionRow) {
+            } else if (position == mediaDownloadSectionRow || position == streamSectionRow || position == callsSectionRow || position == usageSectionRow || position == proxySectionRow || position == vpnSectionRow || position == autoplayHeaderRow || position == saveToGallerySectionRow) {
                 return 2;
             } else if (position == enableCacheStreamRow || position == enableStreamRow || position == enableAllStreamRow || position == enableMkvRow || position == autoplayGifsRow || position == autoplayVideoRow) {
                 return 3;

@@ -103,6 +103,7 @@ import org.telegram.messenger.BotGuardHelper;
 import org.telegram.messenger.BotWebViewVibrationEffect;
 import org.telegram.messenger.BuildConfig;
 import org.telegram.messenger.BuildVars;
+import org.telegram.messenger.vpn.SingBoxManager;
 import org.telegram.messenger.ChannelBoostsController;
 import org.telegram.messenger.ChatObject;
 import org.telegram.messenger.ContactsController;
@@ -1517,8 +1518,42 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
         return handleIntent(intent, isNew, restore, fromPassword, null, true, false);
     }
 
+    // DEBUG-only test hook for the embedded VPN core (no UI yet). Trigger via adb:
+    //   connect:    adb shell am start -n org.telegram.messenger.beta/org.telegram.ui.LaunchActivity --es vpn_key "vpn://..."
+    //   disconnect: adb shell am start -n org.telegram.messenger.beta/org.telegram.ui.LaunchActivity --es vpn_key "disconnect"
+    // Also accepts a vpn:// / vless:// / hysteria2:// / awg:// VIEW-intent data URI.
+    private boolean handleVpnTestIntent(Intent intent) {
+        if (!BuildVars.DEBUG_VERSION || intent == null) {
+            return false;
+        }
+        String key = intent.getStringExtra("vpn_key");
+        if (key == null) {
+            Uri data = intent.getData();
+            if (data != null) {
+                String low = data.toString().toLowerCase();
+                if (low.startsWith("vpn://") || low.startsWith("vless://") || low.startsWith("hysteria2://") || low.startsWith("awg://")) {
+                    key = data.toString();
+                }
+            }
+        }
+        if (key == null) {
+            return false;
+        }
+        if ("disconnect".equalsIgnoreCase(key.trim())) {
+            SingBoxManager.getInstance().disconnect();
+            Toast.makeText(this, "pelegram VPN: disconnecting", Toast.LENGTH_SHORT).show();
+            return true;
+        }
+        SingBoxManager.getInstance().connect(key);
+        Toast.makeText(this, "pelegram VPN: connecting...", Toast.LENGTH_SHORT).show();
+        return true;
+    }
+
     @SuppressLint("Range")
     private boolean handleIntent(Intent intent, boolean isNew, boolean restore, boolean fromPassword, Browser.Progress progress, boolean rebuildFragments, boolean openedTelegram) {
+        if (handleVpnTestIntent(intent)) {
+            return true;
+        }
         if (GiftInfoBottomSheet.handleIntent(intent, progress)) {
             return true;
         }
