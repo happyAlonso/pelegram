@@ -2,12 +2,15 @@ package org.telegram.messenger.vpn;
 
 import android.net.Uri;
 import android.text.TextUtils;
+import android.util.Base64;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.zip.Inflater;
 
 /**
  * Turns a pasted VPN share link into a sing-box config JSON with:
@@ -42,12 +45,8 @@ public class SingBoxConfigBuilder {
         direct.put("type", "direct");
         direct.put("tag", "direct");
 
-        JSONArray outbounds = new JSONArray();
-        outbounds.put(outbound);
-        outbounds.put(direct);
-
         JSONObject route = new JSONObject();
-        // Everything from the socks inbound leaves via the proxy outbound.
+        // Everything from the socks inbound leaves via the proxy outbound/endpoint (by tag).
         route.put("final", TAG_PROXY);
 
         JSONObject log = new JSONObject();
@@ -57,7 +56,13 @@ public class SingBoxConfigBuilder {
         JSONObject root = new JSONObject();
         root.put("log", log);
         root.put("inbounds", new JSONArray().put(socksIn));
-        root.put("outbounds", outbounds);
+        // wireguard (incl. AmneziaWG) is an `endpoint`, not an `outbound`, in current sing-box.
+        if ("wireguard".equals(outbound.optString("type"))) {
+            root.put("endpoints", new JSONArray().put(outbound));
+            root.put("outbounds", new JSONArray().put(direct));
+        } else {
+            root.put("outbounds", new JSONArray().put(outbound).put(direct));
+        }
         root.put("route", route);
         return root.toString();
     }
@@ -65,8 +70,16 @@ public class SingBoxConfigBuilder {
     /** Parse just the outbound object for a key (also used for pre-connect URLTest). */
     public static JSONObject buildOutbound(String rawKey) throws Exception {
         String key = rawKey.trim();
+        // An edited connection is stored as a ready sing-box outbound JSON.
+        if (key.startsWith("{")) {
+            JSONObject o = new JSONObject(key);
+            o.put("tag", TAG_PROXY);
+            return o;
+        }
         String lower = key.toLowerCase();
-        if (lower.startsWith("hysteria2://") || lower.startsWith("hy2://")) {
+        if (lower.startsWith("vpn://")) {
+            return parseVpnUri(key);
+        } else if (lower.startsWith("hysteria2://") || lower.startsWith("hy2://")) {
             return parseHysteria2(key);
         } else if (lower.startsWith("vless://")) {
             return parseVless(key);
@@ -165,6 +178,67 @@ public class SingBoxConfigBuilder {
         return o;
     }
 
+    // AmneziaVPN vpn:// backup blob: base64url -> Qt qCompress (4-byte big-endian size + zlib)
+    // -> JSON { containers:[{ awg:{ last_config:"<json>" } }] }, where last_config.config is a
+    // full awg-quick .conf we can reuse. Handles the amnezia-awg / amnezia-awg2 containers.
+    private static JSONObject parseVpnUri(String key) throws Exception {
+        String b64 = key.substring("vpn://".length()).trim();
+        byte[] compressed = Base64.decode(b64, Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
+        byte[] json = qUncompress(compressed);
+        JSONObject root = new JSONObject(new String(json, StandardCharsets.UTF_8));
+
+        JSONArray containers = root.getJSONArray("containers");
+        String def = root.optString("defaultContainer", null);
+        JSONObject awg = null;
+        for (int i = 0; i < containers.length(); i++) {
+            JSONObject c = containers.getJSONObject(i);
+            if (!c.has("awg")) continue;
+            if (def != null && def.equals(c.optString("container"))) {
+                awg = c.getJSONObject("awg");
+                break;
+            }
+            if (awg == null) {
+                awg = c.getJSONObject("awg");
+            }
+        }
+        if (awg == null) {
+            throw new IllegalArgumentException("vpn:// key has no AmneziaWG container");
+        }
+
+        JSONObject lastConfig = new JSONObject(awg.getString("last_config"));
+        JSONObject outbound = parseAmneziaWg(lastConfig.getString("config"));
+        // MTU isn't in the .conf text; it's a separate field in last_config.
+        if (lastConfig.has("mtu")) {
+            try {
+                outbound.put("mtu", Integer.parseInt(lastConfig.getString("mtu")));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return outbound;
+    }
+
+    // Qt qUncompress: 4-byte big-endian uncompressed size, then a zlib stream.
+    private static byte[] qUncompress(byte[] data) throws Exception {
+        if (data.length < 5) {
+            throw new IllegalArgumentException("vpn:// payload too short");
+        }
+        Inflater inflater = new Inflater();
+        inflater.setInput(data, 4, data.length - 4);
+        ByteArrayOutputStream out = new ByteArrayOutputStream(Math.max(64, data.length * 3));
+        byte[] buf = new byte[8192];
+        while (!inflater.finished()) {
+            int n = inflater.inflate(buf);
+            if (n == 0) {
+                if (inflater.finished() || inflater.needsInput() || inflater.needsDictionary()) {
+                    break;
+                }
+            }
+            out.write(buf, 0, n);
+        }
+        inflater.end();
+        return out.toByteArray();
+    }
+
     // AmneziaWG: awg-quick .conf text ([Interface]/[Peer] with Jc/Jmin/Jmax/S1../H1.. keys).
     // Emits a sing-box `wireguard` endpoint-style outbound with the lx-fork awg fields.
     private static JSONObject parseAmneziaWg(String conf) throws Exception {
@@ -189,6 +263,7 @@ public class SingBoxConfigBuilder {
             if (eq < 0) continue;
             String k = t.substring(0, eq).trim().toLowerCase();
             String v = t.substring(eq + 1).trim();
+            if (v.isEmpty()) continue; // e.g. empty I2..I5 = unset
 
             if (section.contains("interface")) {
                 switch (k) {
@@ -220,6 +295,7 @@ public class SingBoxConfigBuilder {
                     case "publickey": peer.put("public_key", v); break;
                     case "presharedkey": peer.put("pre_shared_key", v); break;
                     case "endpoint": endpoint = v; break;
+                    case "persistentkeepalive": peer.put("persistent_keepalive_interval", Integer.parseInt(v)); break;
                     case "allowedips": {
                         JSONArray allowed = new JSONArray();
                         for (String a : v.split(",")) allowed.put(a.trim());
@@ -231,14 +307,17 @@ public class SingBoxConfigBuilder {
             }
         }
 
+        // sing-box wireguard endpoint: interface addresses under "address"; the server endpoint
+        // lives on the peer (address/port), NOT at the outbound root.
         if (endpoint != null) {
             int c = endpoint.lastIndexOf(':');
-            o.put("server", endpoint.substring(0, c));
-            o.put("server_port", Integer.parseInt(endpoint.substring(c + 1)));
             peer.put("address", endpoint.substring(0, c));
             peer.put("port", Integer.parseInt(endpoint.substring(c + 1)));
         }
-        o.put("local_address", localAddress);
+        if (!peer.has("allowed_ips")) {
+            peer.put("allowed_ips", new JSONArray().put("0.0.0.0/0").put("::/0"));
+        }
+        o.put("address", localAddress);
         o.put("peers", new JSONArray().put(peer));
         return o;
     }

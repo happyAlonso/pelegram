@@ -15,7 +15,7 @@ import libbox.WIFIState;
  * Minimal libbox PlatformInterface for the app-scoped SOCKS mode.
  *
  * We run sing-box with a `socks` inbound only (no `tun` inbound), so openTun() is never
- * invoked and the OS-integration hooks below are not needed. The usePlatform*/useProcFS
+ * invoked and the OS-integration hooks below are not needed. The usePlatform and useProcFS
  * toggles return false so the Go core does its own interface handling instead of calling
  * back into these stubs. If a future TUN (full-device) mode is added, this class is where
  * the VpnService fd + interface monitoring get implemented.
