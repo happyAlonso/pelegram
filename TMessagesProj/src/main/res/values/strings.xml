@@ -1,8 +1,26 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="AppName">Telegram</string>
-    <string name="AppNameBeta">Telegram Beta</string>
+    <string name="AppName">pelegram</string>
+    <string name="AppNameBeta">pelegram</string>
     <string name="LanguageName">English</string>
+    <string name="Vpn">VPN</string>
+    <string name="VpnSettings">VPN Settings</string>
+    <string name="UseVpn">Use VPN</string>
+    <string name="VpnAutoSwitch">Auto-switch VPN</string>
+    <string name="VpnAutoSwitchInfo">Choose how quickly the app should switch to another connection when the current one stops responding.</string>
+    <string name="VpnDetails">Edit connection</string>
+    <string name="VpnDetailsInfo">Edit the settings of this connection. Leave a field empty to remove it.</string>
+    <string name="VpnConnections">Connections</string>
+    <string name="AddVpn">Add VPN</string>
+    <string name="VpnInfo">Route Telegram through a VPN tunnel instead of a proxy. Tap a connection to use it.</string>
+    <string name="VpnKeyHint">VPN key</string>
+    <string name="VpnNameHint">Name (optional)</string>
+    <string name="VpnAddInfo">Paste a vpn:// (AmneziaWG), vless:// or hysteria2:// link, or an AmneziaWG config.</string>
+    <string name="VpnSupportedProtocols">Supported protocols</string>
+    <string name="VpnSupportedProtocolsInfo">pelegram routes Telegram through an embedded tunnel. Supported:\n\n- VLESS (incl. REALITY, XHTTP)\n- Hysteria2 (QUIC, obfs)\n- AmneziaWG 2.0 (vpn:// backups and awg configs)</string>
+    <string name="VpnDeleteTitle">Delete connection</string>
+    <string name="VpnDeleteText">Delete this VPN connection?</string>
+    <string name="VpnInvalidKey">Could not read this VPN key</string>
     <string name="English">English</string>
     <string name="LanguageNameInEnglish">English</string>
     <string name="LanguageCode">en</string>
