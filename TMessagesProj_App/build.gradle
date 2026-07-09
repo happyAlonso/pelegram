@@ -136,7 +136,9 @@ android {
         }
         afat {
             ndk {
-                abiFilters "armeabi-v7a", "arm64-v8a", "x86", "x86_64"
+                // arm64-v8a only for now (matches the single-ABI sing-box core). Restore the
+                // full "armeabi-v7a","arm64-v8a","x86","x86_64" list when shipping all ABIs.
+                abiFilters "arm64-v8a"
             }
             sourceSets.debug {
                 manifest.srcFile '../TMessagesProj/config/debug/AndroidManifest_SDK23.xml'

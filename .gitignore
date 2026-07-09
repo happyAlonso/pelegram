@@ -13,3 +13,6 @@ TMessagesProj_App/afat/
 TMessagesProj_AppHockeyApp/afat/
 TMessagesProj_AppStandalone/afat/
 TMessagesProj_AppHuawei/afat/
+
+# Local secrets - Telegram api_id / api_hash + prod/test DC config (NEVER commit)
+/secrets/

@@ -5,6 +5,7 @@ apply plugin: 'com.android.library'
 repositories {
     mavenCentral()
     google()
+    flatDir { dirs 'libs' }
 }
 
 configurations {
@@ -17,6 +18,10 @@ configurations.all {
 }
 
 dependencies {
+    // Embedded sing-box (lx fork) tunnel core: VLESS+REALITY, Hysteria2, AmneziaWG 2.0.
+    // arm64-v8a only for now. Regenerate with Tools/build-singbox-lx.sh.
+    implementation(name: 'libbox-lx', ext: 'aar')
+
     implementation 'androidx.core:core:1.16.0'
     implementation 'androidx.palette:palette:1.0.0'
     implementation 'androidx.exifinterface:exifinterface:1.3.6'
@@ -116,6 +121,13 @@ android {
         vectorDrawables.generatedDensities = ['mdpi', 'hdpi', 'xhdpi', 'xxhdpi']
 
         multiDexEnabled true
+
+        // api_id / api_hash injected from the gitignored secrets/ dir so they stay out of
+        // tracked source. Falls back to Telegram's public placeholder if secrets/ is absent.
+        def apiIdFile = rootProject.file('secrets/api_id')
+        def apiHashFile = rootProject.file('secrets/api_hash')
+        buildConfigField "int", "APP_ID_OVERRIDE", (apiIdFile.exists() ? apiIdFile.text.trim() : "4")
+        buildConfigField "String", "APP_HASH_OVERRIDE", "\"" + (apiHashFile.exists() ? apiHashFile.text.trim() : "014b35b6184100b085b0d0572f9b5103") + "\""
 
         externalNativeBuild {
             cmake {
