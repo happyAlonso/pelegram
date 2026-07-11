@@ -1302,7 +1302,9 @@ public class DialogStoriesCell extends FrameLayout implements NotificationCenter
             titleView.setText(currentTitle, !LocaleController.isRTL);
         }
 
-        animatorHasTitleText.setValue(hasOverlayText, true);
+        // Show the text title (e.g. the "Pelegram" app name) whenever there is one, not only for an
+        // overlay - otherwise clearing an overlay (e.g. after the VPN connects) flips back to the logo.
+        animatorHasTitleText.setValue(!TextUtils.isEmpty(currentTitle) || hasOverlayText, true);
         if (hasEllipsizedText) {
             ellipsizeSpanAnimator.addView(titleView);
         } else {

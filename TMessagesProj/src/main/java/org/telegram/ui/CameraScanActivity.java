@@ -713,7 +713,12 @@ public class CameraScanActivity extends BaseFragment {
                                             if (delegate != null) {
                                                 delegate.didFindQr(res.text);
                                             }
-                                            removeSelfFromStack();
+                                            // In continuous mode (multi-code) the delegate dismisses
+                                            // the sheet itself once it has enough; keep it open so the
+                                            // next code can be picked from the gallery.
+                                            if (delegate == null || !delegate.isContinuousScan()) {
+                                                removeSelfFromStack();
+                                            }
                                         }
                                     }
                                 }
