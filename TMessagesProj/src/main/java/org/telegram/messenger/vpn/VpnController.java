@@ -9,6 +9,7 @@ import org.json.JSONObject;
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.ApplicationLoader;
 import org.telegram.messenger.FileLog;
+import org.telegram.messenger.MessagesController;
 import org.telegram.messenger.UserConfig;
 import org.telegram.tgnet.ConnectionsManager;
 
@@ -92,6 +93,7 @@ public class VpnController implements SingBoxManager.StateListener {
                 && SingBoxManager.getInstance().getState() == SingBoxManager.STATE_IDLE) {
             reconnect();
         }
+        updateBackgroundKeepAlive();
     }
 
     public void save() {
@@ -146,6 +148,7 @@ public class VpnController implements SingBoxManager.StateListener {
         if (isEnabled()) {
             reconnect();
         }
+        updateBackgroundKeepAlive();
     }
 
     /** After editing an existing key's fields. */
@@ -171,6 +174,7 @@ public class VpnController implements SingBoxManager.StateListener {
             } else {
                 SingBoxManager.getInstance().disconnect();
             }
+            updateBackgroundKeepAlive();
         }
     }
 
@@ -191,6 +195,7 @@ public class VpnController implements SingBoxManager.StateListener {
         } else {
             SingBoxManager.getInstance().disconnect();
         }
+        updateBackgroundKeepAlive();
         notifyList();
     }
 
@@ -198,6 +203,38 @@ public class VpnController implements SingBoxManager.StateListener {
         AndroidUtilities.cancelRunOnUIThread(autoSwitchRunnable);
         if (currentVpn != null && !TextUtils.isEmpty(currentVpn.key)) {
             SingBoxManager.getInstance().connect(currentVpn.key);
+        }
+    }
+
+    /**
+     * Keep the app alive in the background while the VPN is on so the in-process proxy survives and
+     * tgnet holds its push connection open - without this the fork gets no notifications when the UI
+     * is closed (it can't use FCM). Mirrors the state of {@link #isEnabled()}.
+     */
+    private void updateBackgroundKeepAlive() {
+        boolean on = isEnabled();
+        setPushConnection(on);
+        if (on) {
+            VpnForegroundService.start();
+        } else {
+            VpnForegroundService.stop();
+        }
+    }
+
+    /**
+     * Turn tgnet's persistent push connection on/off. The global pref is what {@code init()} reads on
+     * a cold start, so persist it there; the per-account call takes effect immediately.
+     */
+    private void setPushConnection(boolean on) {
+        try {
+            MessagesController.getGlobalNotificationsSettings().edit().putBoolean("pushConnection", on).apply();
+            for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) {
+                if (UserConfig.getInstance(a).isClientActivated()) {
+                    ConnectionsManager.getInstance(a).setPushConnectionEnabled(on);
+                }
+            }
+        } catch (Throwable e) {
+            FileLog.e(e);
         }
     }
 

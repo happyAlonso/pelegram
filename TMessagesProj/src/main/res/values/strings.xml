@@ -22,6 +22,7 @@
     <string name="VpnUpdateAvailable">A new version of Pelegram is available.</string>
     <string name="VpnUpdateDownloading">Downloading update…</string>
     <string name="VpnQrPart">Scanned %1$d of %2$d QR codes, scan the next one</string>
+    <string name="VpnForegroundActive">VPN is on - keeping Pelegram connected</string>
     <string name="VpnAddInfo">Paste a vpn:// (AmneziaWG), vless://, hysteria2:// or ss:// (Shadowsocks/Outline) link, or an AmneziaWG config, or tap the QR icon to scan.</string>
     <string name="VpnSupportedProtocols">Supported protocols</string>
     <string name="VpnSupportedProtocolsInfo">pelegram routes Telegram through an embedded tunnel. Supported:\n\n- VLESS (incl. REALITY, XHTTP)\n- Hysteria2 (QUIC, obfs)\n- AmneziaWG 2.0 (vpn:// backups and awg configs)\n- Shadowsocks / Outline (ss://, with prefix disguise)</string>
