@@ -298,6 +298,15 @@ public class VpnController implements SingBoxManager.StateListener {
             if (time == -1) {
                 info.available = false;
                 info.ping = 0;
+                // The core reports "connected" the moment it starts, even if the server is dead or
+                // blocked - startInternal only fails on a bad config, not on an unreachable server. This
+                // proxy ping is the real reachability check, so a failure here is what should drive
+                // auto-switch (STATE_ERROR alone almost never fires for a blocked server).
+                if (enabled && autoSwitch && info == currentVpn && vpnList.size() > 1) {
+                    AndroidUtilities.cancelRunOnUIThread(autoSwitchRunnable);
+                    int seconds = AUTOSWITCH_TIMEOUTS[Math.max(0, Math.min(autoSwitchTimeoutIndex, AUTOSWITCH_TIMEOUTS.length - 1))];
+                    AndroidUtilities.runOnUIThread(autoSwitchRunnable, seconds * 1000L);
+                }
             } else {
                 info.available = true;
                 info.ping = time;
