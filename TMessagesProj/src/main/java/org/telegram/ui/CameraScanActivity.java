@@ -1096,17 +1096,36 @@ public class CameraScanActivity extends BaseFragment {
                     recognizedText = res.text;
                     if (!recognized) {
                         recognized = true;
-                        qrLoading = delegate.processQr(recognizedText, () -> {
-                            if (cameraView != null && cameraView.getCameraSession() != null) {
-                                CameraController.getInstance().stopPreview(cameraView.getCameraSession());
-                            }
+                        if (delegate != null && delegate.isContinuousScan()) {
+                            // Continuous multi-code scan (e.g. split AmneziaVPN QR): hand off this
+                            // code right away and re-arm for the next one, instead of the 1s
+                            // confirm-then-close flow that stalls scanning of a second code.
+                            qrLoading = true;
+                            final String found = recognizedText;
                             AndroidUtilities.runOnUIThread(() -> {
                                 if (delegate != null) {
-                                    delegate.didFindQr(recognizedText);
+                                    delegate.didFindQr(found);
                                 }
-                                finishFragment();
+                                recognizedText = null;
+                                recognized = false;
+                                qrLoading = false;
+                                recognizeIndex = 0;
+                                recognizeFailed = 0;
+                                updateRecognized();
                             });
-                        });
+                        } else {
+                            qrLoading = delegate.processQr(recognizedText, () -> {
+                                if (cameraView != null && cameraView.getCameraSession() != null) {
+                                    CameraController.getInstance().stopPreview(cameraView.getCameraSession());
+                                }
+                                AndroidUtilities.runOnUIThread(() -> {
+                                    if (delegate != null) {
+                                        delegate.didFindQr(recognizedText);
+                                    }
+                                    finishFragment();
+                                });
+                            });
+                        }
                         recognizedStart = SystemClock.elapsedRealtime();
                         AndroidUtilities.runOnUIThread(this::updateRecognized);
                     }
