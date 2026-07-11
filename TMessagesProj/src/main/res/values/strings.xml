@@ -19,6 +19,8 @@
     <string name="VpnKeyHint">VPN key</string>
     <string name="VpnNameHint">Name (optional)</string>
     <string name="VpnScanQr">Scan QR code</string>
+    <string name="VpnUpdateAvailable">A new version of Pelegram is available.</string>
+    <string name="VpnUpdateDownloading">Downloading update…</string>
     <string name="VpnQrPart">Scanned %1$d of %2$d QR codes, scan the next one</string>
     <string name="VpnAddInfo">Paste a vpn:// (AmneziaWG), vless://, hysteria2:// or ss:// (Shadowsocks/Outline) link, or an AmneziaWG config, or tap the QR icon to scan.</string>
     <string name="VpnSupportedProtocols">Supported protocols</string>

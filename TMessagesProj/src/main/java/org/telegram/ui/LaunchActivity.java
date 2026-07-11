@@ -6005,10 +6005,11 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
 
     private boolean firstAppUpdateCheck = true;
     public void checkAppUpdate(boolean force, Browser.Progress progress) {
-        if (!ApplicationLoader.isStandaloneBuild() && !ApplicationLoader.isBetaBuild()) {
+        // pelegram: a custom updater (GitHub Releases) is always allowed to run.
+        if (!ApplicationLoader.applicationLoaderInstance.isCustomUpdate() && !ApplicationLoader.isStandaloneBuild() && !ApplicationLoader.isBetaBuild()) {
             return;
         }
-        if (!force && !BuildVars.CHECK_UPDATES) {
+        if (!force && !BuildVars.CHECK_UPDATES && !ApplicationLoader.applicationLoaderInstance.isCustomUpdate()) {
             return;
         }
         if (ApplicationLoader.applicationLoaderInstance.isCustomUpdate()) {

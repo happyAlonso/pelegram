@@ -5894,6 +5894,17 @@ public class AndroidUtilities {
         return null;
     }
 
+    // Content URI for a file via the app's FileProvider (androidx.core is not exposed to flavor
+    // modules, so they route through here - e.g. the GitHub updater installing a downloaded APK).
+    public static Uri getFileProviderUri(File file) {
+        try {
+            return FileProvider.getUriForFile(ApplicationLoader.applicationContext, ApplicationLoader.getApplicationId() + ".provider", file);
+        } catch (Exception e) {
+            FileLog.e(e);
+            return Uri.fromFile(file);
+        }
+    }
+
     public static boolean isNumeric(String str) {
         try {
             Double.parseDouble(str);
