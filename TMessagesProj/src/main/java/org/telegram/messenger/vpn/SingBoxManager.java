@@ -3,6 +3,7 @@ package org.telegram.messenger.vpn;
 import android.content.Context;
 
 import org.telegram.messenger.ApplicationLoader;
+import org.telegram.messenger.BuildVars;
 import org.telegram.messenger.FileLog;
 import org.telegram.tgnet.ConnectionsManager;
 
@@ -59,6 +60,7 @@ public class SingBoxManager implements CommandServerHandler {
     private final ArrayList<StateListener> listeners = new ArrayList<>();
 
     private CommandServer commandServer;
+    private SingBoxLogClient logClient;
     private volatile int state = STATE_IDLE;
     private volatile int localPort = -1;
     private String activeKey;
@@ -139,6 +141,13 @@ public class SingBoxManager implements CommandServerHandler {
             commandServer = server;
             localPort = port;
             activeKey = rawKey;
+
+            // Mirror the sing-box core log stream into FileLog (so dial/reset/DNS lines are reachable
+            // via the app's log export) - only when logging is on, so normal runs pay nothing.
+            if (BuildVars.LOGS_ENABLED) {
+                logClient = new SingBoxLogClient();
+                logClient.start();
+            }
         }
 
         // Point tgnet at the local SOCKS5. Empty secret/user/pass = plain SOCKS5 path.
@@ -148,6 +157,10 @@ public class SingBoxManager implements CommandServerHandler {
 
     private void stopInternalQuietly() {
         synchronized (lock) {
+            if (logClient != null) {
+                logClient.stop();
+                logClient = null;
+            }
             if (commandServer != null) {
                 try {
                     commandServer.closeService();

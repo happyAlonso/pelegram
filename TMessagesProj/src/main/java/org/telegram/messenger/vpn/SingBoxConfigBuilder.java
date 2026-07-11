@@ -5,9 +5,12 @@ import android.text.TextUtils;
 import android.util.Base64;
 
 import org.json.JSONArray;
+import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
+import java.net.Inet4Address;
+import java.net.InetAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.zip.Inflater;
@@ -33,6 +36,10 @@ public class SingBoxConfigBuilder {
     /** Build the full sing-box config for a key, with the SOCKS inbound on the given port. */
     public static String build(String rawKey, int localPort) throws Exception {
         JSONObject outbound = buildOutbound(rawKey);
+        // The core's default resolver on Android points at a non-existent local :53 and fails, so a
+        // hostname server (e.g. Outline keys) never connects. Resolve it here with the device
+        // resolver (which works - it's what the browser/Outline use) and hand the core an IP.
+        resolveServerAddresses(outbound);
 
         JSONObject socksIn = new JSONObject();
         socksIn.put("type", "socks");
@@ -64,6 +71,80 @@ public class SingBoxConfigBuilder {
         }
         root.put("route", route);
         return root.toString();
+    }
+
+    /**
+     * Replace hostname server addresses with resolved IPs, so the core never has to run DNS itself
+     * (its Android default resolver targets a dead local :53). Called only on the connect path
+     * (build), off the main thread - never from buildOutbound, which may run on the UI thread.
+     */
+    private static void resolveServerAddresses(JSONObject outbound) throws JSONException {
+        String server = outbound.optString("server", null);
+        if (server != null) {
+            outbound.put("server", resolveHost(server));
+        }
+        JSONArray peers = outbound.optJSONArray("peers"); // wireguard / AmneziaWG endpoint
+        if (peers != null) {
+            for (int i = 0; i < peers.length(); i++) {
+                JSONObject peer = peers.optJSONObject(i);
+                if (peer != null) {
+                    String addr = peer.optString("address", null);
+                    if (addr != null) {
+                        peer.put("address", resolveHost(addr));
+                    }
+                }
+            }
+        }
+    }
+
+    /** Resolve a hostname to an IP via the device resolver, preferring IPv4. IPs pass through. */
+    private static String resolveHost(String host) {
+        if (TextUtils.isEmpty(host) || isNumericAddress(host)) {
+            return host;
+        }
+        try {
+            InetAddress[] addrs = InetAddress.getAllByName(host);
+            InetAddress first = null;
+            for (InetAddress a : addrs) {
+                if (first == null) {
+                    first = a;
+                }
+                if (a instanceof Inet4Address) {
+                    return a.getHostAddress();
+                }
+            }
+            if (first != null) {
+                return first.getHostAddress();
+            }
+        } catch (Exception ignored) {
+            // fall through: leave the hostname and let the core try (it will likely fail, but we
+            // don't want to hard-fail the connect on a transient resolver hiccup)
+        }
+        return host;
+    }
+
+    private static boolean isNumericAddress(String host) {
+        if (host.indexOf(':') >= 0) {
+            return true; // IPv6 literal
+        }
+        String[] parts = host.split("\\.");
+        if (parts.length != 4) {
+            return false;
+        }
+        for (String p : parts) {
+            if (p.isEmpty() || p.length() > 3) {
+                return false;
+            }
+            for (int i = 0; i < p.length(); i++) {
+                if (!Character.isDigit(p.charAt(i))) {
+                    return false;
+                }
+            }
+            if (Integer.parseInt(p) > 255) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** Parse just the outbound object for a key (also used for pre-connect URLTest). */
