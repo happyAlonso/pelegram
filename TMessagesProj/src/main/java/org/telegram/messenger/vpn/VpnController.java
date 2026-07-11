@@ -87,6 +87,11 @@ public class VpnController implements SingBoxManager.StateListener {
         } else if (!vpnList.isEmpty()) {
             currentVpn = vpnList.get(0);
         }
+        // The core doesn't survive a process restart, so bring the tunnel back up if it was on.
+        if (enabled && currentVpn != null && !TextUtils.isEmpty(currentVpn.key)
+                && SingBoxManager.getInstance().getState() == SingBoxManager.STATE_IDLE) {
+            reconnect();
+        }
     }
 
     public void save() {

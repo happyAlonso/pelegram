@@ -446,6 +446,10 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
             SharedConfig.lastPauseTime = (int) (SystemClock.elapsedRealtime() / 1000);
         }
         AndroidUtilities.fillStatusBarHeight(this, false);
+        // Restore the VPN on a cold start: reconnect it if it was left enabled (the sing-box core
+        // dies with the process, so it must be brought back up), and initialize its state so the
+        // connection-status bar routes to the VPN screen rather than the proxy one.
+        VpnController.getInstance().load();
         actionBarLayout = new ActionBarLayout(this, true);
 
         frameLayout = new FrameLayout(this) {
