@@ -41,8 +41,10 @@ public class SingBoxConfigBuilder {
         // resolver (which works - it's what the browser/Outline use) and hand the core an IP.
         resolveServerAddresses(outbound);
 
+        // "mixed" serves BOTH SOCKS5 and HTTP CONNECT on the one port: tgnet uses the SOCKS side, while
+        // routed calls use the HTTP side (webrtc can only proxy over HTTP CONNECT, not SOCKS).
         JSONObject socksIn = new JSONObject();
-        socksIn.put("type", "socks");
+        socksIn.put("type", "mixed");
         socksIn.put("tag", TAG_SOCKS_IN);
         socksIn.put("listen", "127.0.0.1");
         socksIn.put("listen_port", localPort);

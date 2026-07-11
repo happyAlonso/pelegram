@@ -597,7 +597,9 @@ void NativeNetworkingImpl::resetDtlsSrtpTransport() {
         cricket::PORTALLOCATOR_ENABLE_IPV6 |
         cricket::PORTALLOCATOR_ENABLE_IPV6_ON_WIFI;
 
-    if (!_enableTCP) {
+    // A proxied call needs TCP candidates: UDP/STUN get disabled below and the HTTP CONNECT proxy can
+    // only carry TCP, so don't disable TCP when a proxy is set.
+    if (!_enableTCP && !_proxy) {
         flags |= cricket::PORTALLOCATOR_DISABLE_TCP;
     }
 
@@ -614,6 +616,16 @@ void NativeNetworkingImpl::resetDtlsSrtpTransport() {
     _portAllocator->set_flags(flags);
     _portAllocator->Initialize();
 
+    if (_proxy) {
+        // Send the call's relay/TCP sockets through the local HTTP CONNECT proxy (the embedded VPN).
+        // webrtc's socket layer implements HTTPS proxying; ReflectorPort honors this too (patched).
+        rtc::ProxyInfo proxyInfo;
+        proxyInfo.type = rtc::PROXY_HTTPS;
+        proxyInfo.address = rtc::SocketAddress(_proxy->host, _proxy->port);
+        proxyInfo.username = _proxy->login;
+        _portAllocator->set_proxy("tgcalls", proxyInfo);
+    }
+
     cricket::ServerAddresses stunServers;
     std::vector<cricket::RelayServerConfig> turnServers;
 
@@ -623,7 +635,9 @@ void NativeNetworkingImpl::resetDtlsSrtpTransport() {
                 rtc::SocketAddress(server.host, server.port),
                 server.login,
                 server.password,
-                server.isTcp ? cricket::PROTO_TCP : cricket::PROTO_UDP
+                // through a proxy the relay must be reached over TCP (UDP is disabled and can't be
+                // carried by an HTTP CONNECT proxy), so force TCP for every relay in that case.
+                (_proxy || server.isTcp) ? cricket::PROTO_TCP : cricket::PROTO_UDP
             ));
         } else {
             rtc::SocketAddress stunAddress = rtc::SocketAddress(server.host, server.port);

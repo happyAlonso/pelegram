@@ -3424,14 +3424,16 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 			// persistent state
 			final String persistentStateFilePath = new File(ApplicationLoader.applicationContext.getCacheDir(), "voip_persistent_state.json").getAbsolutePath();
 
-			// Route call media through the embedded VPN when the user opted in. Only the legacy libtgvoip
-			// engine (2.4.4) can carry a call over the SOCKS5 proxy - the modern engine's webrtc has the
-			// SOCKS path stripped out - so this is only possible when the negotiated protocol still offers
-			// 2.4.4. If it doesn't, fall back to a normal direct call rather than a broken proxied one.
-			final boolean routeCallsThroughVpn = VpnController.getInstance().shouldRouteCalls()
-					&& privateCall.protocol.library_versions.contains("2.4.4");
-			// Force the legacy engine for a proxied call; keep the peer's preferred version otherwise.
-			final String callVersion = routeCallsThroughVpn ? "2.4.4" : privateCall.protocol.library_versions.get(0);
+			// Route call media through the embedded VPN when the user opted in. The call keeps the modern
+			// engine; its webrtc is patched to send the relay/TCP sockets through the local HTTP CONNECT
+			// proxy (see NativeNetworkingImpl / ReflectorPort). An HTTP proxy is TCP-only, so this also
+			// forces TCP relays below.
+			final boolean routeCallsThroughVpn = VpnController.getInstance().shouldRouteCalls();
+			final String callVersion = privateCall.protocol.library_versions.get(0);
+			if (BuildVars.LOGS_ENABLED) {
+				FileLog.d("VoIP: routeCallsThroughVpn=" + routeCallsThroughVpn + " version=" + callVersion
+						+ " proxyPort=" + VpnController.getInstance().getProxyPort());
+			}
 
 			// endpoints - a proxied call uses TCP relays (SOCKS5 CONNECT) for a reliable path.
 			final boolean dbgForceTcp = preferences.getBoolean("dbg_force_tcp_in_calls", false);
@@ -3463,7 +3465,7 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 			// proxy
 			Instance.Proxy proxy = null;
 			if (routeCallsThroughVpn) {
-				// send the call to the local sing-box SOCKS5 inbound (no auth)
+				// point the call at the local sing-box inbound; the native side proxies it over HTTP CONNECT
 				proxy = new Instance.Proxy("127.0.0.1", VpnController.getInstance().getProxyPort(), "", "");
 			} else if (preferences.getBoolean("proxy_enabled", false) && preferences.getBoolean("proxy_enabled_calls", false)) {
 				final String server = preferences.getString("proxy_ip", null);

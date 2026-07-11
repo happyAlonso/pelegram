@@ -18,6 +18,7 @@
 #include "rtc_base/checks.h"
 #include "rtc_base/logging.h"
 #include "rtc_base/net_helpers.h"
+#include "rtc_base/socket_adapters.h"
 #include "rtc_base/socket_address.h"
 #include "rtc_base/strings/string_builder.h"
 #include "system_wrappers/include/field_trial.h"
@@ -94,7 +95,17 @@ rtc::AsyncPacketSocket *CreateClientRawTcpSocket(
         RTC_LOG(LS_ERROR) << "Setting TCP_NODELAY option failed with error "
         << socket->GetError();
     }
-    
+
+    // Route the reflector's TCP connection through an HTTP CONNECT proxy when one is set. This is what
+    // lets a call go through the embedded VPN: the reflector is reached over TCP tunneled by the local
+    // proxy. Without this the socket connected directly and ignored the proxy entirely.
+    if (proxy_info.type == rtc::PROXY_HTTPS) {
+        rtc::AsyncHttpsProxySocket* proxy_socket = new rtc::AsyncHttpsProxySocket(
+            socket, user_agent, proxy_info.address, proxy_info.username, proxy_info.password);
+        proxy_socket->SetForceConnect(true);
+        socket = proxy_socket;
+    }
+
     if (socket->Connect(remote_address) < 0) {
         RTC_LOG(LS_ERROR) << "TCP connect failed with error " << socket->GetError();
         delete socket;
