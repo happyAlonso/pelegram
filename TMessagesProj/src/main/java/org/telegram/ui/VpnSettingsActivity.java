@@ -32,6 +32,7 @@ import org.telegram.ui.ActionBar.ActionBar;
 import org.telegram.ui.ActionBar.ActionBarMenuItem;
 import org.telegram.ui.ActionBar.AlertDialog;
 import org.telegram.ui.ActionBar.BaseFragment;
+import org.telegram.ui.ActionBar.BottomSheet;
 import org.telegram.ui.ActionBar.Theme;
 import org.telegram.ui.Cells.TextInfoPrivacyCell;
 import org.telegram.ui.Components.EditTextBoldCursor;
@@ -209,10 +210,18 @@ public class VpnSettingsActivity extends BaseFragment {
             getParentActivity().requestPermissions(new String[]{Manifest.permission.CAMERA}, CAMERA_PERMISSION_REQUEST_CODE);
             return;
         }
-        CameraScanActivity.showAsSheet(this, false, CameraScanActivity.TYPE_QR, new CameraScanActivity.CameraScanActivityDelegate() {
+        qrChunks.clear();
+        qrChunkCount = 0;
+        final BottomSheet[] sheet = new BottomSheet[1];
+        sheet[0] = CameraScanActivity.showAsSheet(this, false, CameraScanActivity.TYPE_QR, new CameraScanActivity.CameraScanActivityDelegate() {
+            @Override
+            public boolean isContinuousScan() {
+                return true; // keep the camera open so split AmneziaVPN codes can be scanned in a row
+            }
+
             @Override
             public void didFindQr(String text) {
-                AndroidUtilities.runOnUIThread(() -> onQrScanned(text));
+                AndroidUtilities.runOnUIThread(() -> onQrScanned(text, sheet[0]));
             }
         });
     }
@@ -246,14 +255,16 @@ public class VpnSettingsActivity extends BaseFragment {
     // Handle a scanned QR: a plain key (ss://, vless://, ...) goes straight into the field; an
     // AmneziaVPN chunk is collected (and, if split, the scanner reopens) until every part is in,
     // then the reassembled config is filled in.
-    private void onQrScanned(String text) {
+    private void onQrScanned(String text, BottomSheet sheet) {
         if (TextUtils.isEmpty(text)) {
             return;
         }
         int[] parts = SingBoxConfigBuilder.amneziaQrParts(text);
         if (parts == null) {
+            // plain key (ss://, vless://, vpn://, ...)
             qrChunks.clear();
             setRawKey(text.trim());
+            dismissSheet(sheet);
             return;
         }
         int count = parts[0], index = parts[1];
@@ -262,19 +273,23 @@ public class VpnSettingsActivity extends BaseFragment {
         }
         if (qrChunkCount != count) {
             qrChunks.clear();
+            qrChunkCount = count;
         }
-        qrChunkCount = count;
+        if (qrChunks.containsKey(index)) {
+            return; // already have this part; the camera stays open for the remaining ones
+        }
         byte[] data = SingBoxConfigBuilder.amneziaQrChunkData(text);
-        if (data != null) {
-            qrChunks.put(index, data);
+        if (data == null) {
+            return;
         }
+        qrChunks.put(index, data);
         if (qrChunks.size() < count) {
             if (getParentActivity() != null) {
                 Toast.makeText(getParentActivity(), LocaleController.formatString(R.string.VpnQrPart, qrChunks.size(), count), Toast.LENGTH_SHORT).show();
             }
-            AndroidUtilities.runOnUIThread(this::openQrScanner, 350);
-            return;
+            return; // keep the camera open for the remaining parts
         }
+        String key = null;
         try {
             ByteArrayOutputStream bos = new ByteArrayOutputStream();
             for (int i = 0; i < count; i++) {
@@ -283,12 +298,25 @@ public class VpnSettingsActivity extends BaseFragment {
                     bos.write(d);
                 }
             }
-            setRawKey(SingBoxConfigBuilder.amneziaQrToKey(bos.toByteArray()));
+            key = SingBoxConfigBuilder.amneziaQrToKey(bos.toByteArray());
         } catch (Exception e) {
             FileLog.e(e);
         } finally {
             qrChunks.clear();
             qrChunkCount = 0;
+        }
+        if (key != null) {
+            setRawKey(key);
+        }
+        dismissSheet(sheet);
+    }
+
+    private void dismissSheet(BottomSheet sheet) {
+        if (sheet != null) {
+            try {
+                sheet.dismiss();
+            } catch (Exception ignored) {
+            }
         }
     }
 

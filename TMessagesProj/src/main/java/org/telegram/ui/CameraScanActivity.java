@@ -173,6 +173,12 @@ public class CameraScanActivity extends BaseFragment {
             return false;
         }
 
+        // Keep the camera open after each QR (like TYPE_QR_WEB_BOT) so multiple codes can be
+        // scanned in one session; the delegate dismisses the sheet itself when it has enough.
+        default boolean isContinuousScan() {
+            return false;
+        }
+
         default String getSubtitleText() {
             return null;
         }
@@ -1121,7 +1127,7 @@ public class CameraScanActivity extends BaseFragment {
                       (recognizeIndex == 0 && res != null && res.bounds == null && !qrLoading) || // first recognition doesn't have bounds
                       (SystemClock.elapsedRealtime() - recognizedStart > 1000 && !qrLoading) // got more than 1 second and nothing is loading
                     ) && recognizedText != null) {
-                    if (cameraView != null && cameraView.getCameraSession() != null && currentType != TYPE_QR_WEB_BOT) {
+                    if (cameraView != null && cameraView.getCameraSession() != null && !keepScanningQr()) {
                         CameraController.getInstance().stopPreview(cameraView.getCameraSession());
                     }
                     String text = recognizedText;
@@ -1129,11 +1135,11 @@ public class CameraScanActivity extends BaseFragment {
                         if (delegate != null) {
                             delegate.didFindQr(text);
                         }
-                        if (currentType != TYPE_QR_WEB_BOT) {
+                        if (!keepScanningQr()) {
                             finishFragment();
                         }
                     });
-                    if (currentType == TYPE_QR_WEB_BOT) {
+                    if (keepScanningQr()) {
                         AndroidUtilities.runOnUIThread(()->{
                             if (isFinishing()) {
                                 return;
@@ -1411,6 +1417,12 @@ public class CameraScanActivity extends BaseFragment {
 
     private boolean isQr() {
         return currentType == TYPE_QR || currentType == TYPE_QR_LOGIN || currentType == TYPE_QR_WEB_BOT;
+    }
+
+    // Keep the camera scanning after each QR (WEB_BOT does this natively; other types opt in via
+    // the delegate for multi-code flows like AmneziaVPN split QR).
+    private boolean keepScanningQr() {
+        return currentType == TYPE_QR_WEB_BOT || (delegate != null && delegate.isContinuousScan());
     }
 
     @Override

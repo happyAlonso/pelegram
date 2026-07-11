@@ -569,6 +569,12 @@ public class SingBoxConfigBuilder {
         if (!peer.has("allowed_ips")) {
             peer.put("allowed_ips", new JSONArray().put("0.0.0.0/0").put("::/0"));
         }
+        // AmneziaWG uses MTU 1280 by default. The awg-quick text (e.g. from an Amnezia "for other
+        // apps" QR) usually omits it; without it sing-box uses a larger MTU and traffic stalls
+        // ("Connecting" forever). vpn:// keys carry the real MTU in last_config and override this.
+        if (!o.has("mtu")) {
+            o.put("mtu", 1280);
+        }
         o.put("address", localAddress);
         o.put("peers", new JSONArray().put(peer));
         return o;
