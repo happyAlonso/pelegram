@@ -6,6 +6,7 @@
 #include <platform/android/AndroidInterface.h>
 #include <platform/android/AndroidContext.h>
 #include <rtc_base/ssl_adapter.h>
+#include <rtc_base/logging.h>
 #include <modules/utility/include/jvm_android.h>
 #include <sdk/android/native_api/base/init.h>
 #include <voip/webrtc/media/base/media_constants.h>
@@ -29,6 +30,20 @@
 #include "e2e_api.h"
 
 using namespace tgcalls;
+
+// Diagnostic: mirror the call engine's webrtc/reflector logs into the native FileLog (they land in the
+// exported *_net.txt), so a VPN-routed call's ICE/reflector handshake is visible. Registered once, on
+// the first call that has a proxy, so normal calls stay quiet.
+namespace {
+class VoipFileLogSink : public rtc::LogSink {
+public:
+    void OnLogMessage(const std::string &message) override {
+        FileLog::getInstance().e("[voip] %s", message.c_str());
+    }
+};
+VoipFileLogSink g_voipFileLogSink;
+bool g_voipLogSinkRegistered = false;
+}
 
 const auto RegisterTag = Register<InstanceImpl>();
 const auto RegisterTagLegacy = Register<InstanceImplLegacy>();
@@ -751,6 +766,11 @@ JNIEXPORT jlong JNICALL Java_org_telegram_messenger_voip_NativeInstance_makeNati
     jfloat aspectRatio
 ) {
     initWebRTC(env);
+
+    if (!g_voipLogSinkRegistered && !env->IsSameObject(proxyClass, nullptr)) {
+        g_voipLogSinkRegistered = true;
+        rtc::LogMessage::AddLogToStream(&g_voipFileLogSink, rtc::LS_INFO);
+    }
 
     JavaObject configObject(env, config);
     JavaObject encryptionKeyObject(env, encryptionKey);
