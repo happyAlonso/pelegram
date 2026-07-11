@@ -1431,7 +1431,10 @@ public class LocaleController {
     }
 
     private String getStringInternal(String key, String fallback, int fallbackRes, int res) {
-        String value = BuildVars.USE_CLOUD_STRINGS ? localeValues.get(key) : null;
+        // The Telegram cloud language pack defines "AppName" as "Telegram"; force the local
+        // resource so the fork's name ("Pelegram") wins everywhere it is shown.
+        boolean useCloud = BuildVars.USE_CLOUD_STRINGS && !"AppName".equals(key) && !"AppNameBeta".equals(key);
+        String value = useCloud ? localeValues.get(key) : null;
         if (value == null) {
             if (BuildVars.USE_CLOUD_STRINGS && fallback != null) {
                 value = localeValues.get(fallback);
