@@ -18,7 +18,8 @@
     <string name="VpnInfo">Route Telegram through a VPN tunnel instead of a proxy. Tap a connection to use it.</string>
     <string name="VpnKeyHint">VPN key</string>
     <string name="VpnNameHint">Name (optional)</string>
-    <string name="VpnAddInfo">Paste a vpn:// (AmneziaWG), vless://, hysteria2:// or ss:// (Shadowsocks/Outline) link, or an AmneziaWG config.</string>
+    <string name="VpnScanQr">Scan QR code</string>
+    <string name="VpnAddInfo">Paste a vpn:// (AmneziaWG), vless://, hysteria2:// or ss:// (Shadowsocks/Outline) link, or an AmneziaWG config, or tap the QR icon to scan.</string>
     <string name="VpnSupportedProtocols">Supported protocols</string>
     <string name="VpnSupportedProtocolsInfo">pelegram routes Telegram through an embedded tunnel. Supported:\n\n- VLESS (incl. REALITY, XHTTP)\n- Hysteria2 (QUIC, obfs)\n- AmneziaWG 2.0 (vpn:// backups and awg configs)\n- Shadowsocks / Outline (ss://, with prefix disguise)</string>
     <string name="VpnDeleteTitle">Delete connection</string>

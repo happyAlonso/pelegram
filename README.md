@@ -23,6 +23,8 @@ need a separate VPN client just to use Telegram.
   - `hysteria2://` - Hysteria2 (QUIC, with Salamander obfuscation)
   - `ss://` - Shadowsocks / Outline (applies Outline's `prefix` disguise)
   - AmneziaWG 2.0 - paste the `vpn://...` key exported by the **AmneziaVPN** app (the official Amnezia client), or a raw `awg-quick` `[Interface]` / `[Peer]` config
+
+  Or tap the QR icon on the Add VPN screen to scan a key from a QR code.
 - **App-scoped.** Only Telegram's own traffic goes through the tunnel. There is no system-wide VPN,
   no `VpnService`, and no extra Android permission. The core exposes a local SOCKS5 endpoint and the
   app points Telegram's existing proxy layer at it.

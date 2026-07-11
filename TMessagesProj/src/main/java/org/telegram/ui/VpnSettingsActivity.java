@@ -4,6 +4,7 @@ import static org.telegram.messenger.LocaleController.getString;
 
 import android.content.Context;
 import android.text.InputType;
+import android.text.TextUtils;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
@@ -39,6 +40,7 @@ import java.util.Map;
 public class VpnSettingsActivity extends BaseFragment {
 
     private static final int done_button = 1;
+    private static final int scan_button = 2;
 
     private static final int KIND_STRING = 0;
     private static final int KIND_NUMBER = 1;
@@ -106,9 +108,16 @@ public class VpnSettingsActivity extends BaseFragment {
                     finishFragment();
                 } else if (id == done_button) {
                     save();
+                } else if (id == scan_button) {
+                    openQrScanner();
                 }
             }
         });
+        // In add mode, offer scanning a key from a QR code.
+        if (editingInfo == null) {
+            ActionBarMenuItem scanItem = actionBar.createMenu().addItemWithWidth(scan_button, R.drawable.msg_qr_mini, AndroidUtilities.dp(56));
+            scanItem.setContentDescription(getString(R.string.VpnScanQr));
+        }
         ActionBarMenuItem doneItem = actionBar.createMenu().addItemWithWidth(done_button, R.drawable.ic_ab_done, AndroidUtilities.dp(56));
         doneItem.setContentDescription(getString(R.string.Done));
 
@@ -177,6 +186,24 @@ public class VpnSettingsActivity extends BaseFragment {
         linearLayout.addView(info, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
 
         return fragmentView;
+    }
+
+    private void openQrScanner() {
+        if (getParentActivity() == null) {
+            return;
+        }
+        CameraScanActivity.showAsSheet(this, false, CameraScanActivity.TYPE_QR, new CameraScanActivity.CameraScanActivityDelegate() {
+            @Override
+            public void didFindQr(String text) {
+                AndroidUtilities.runOnUIThread(() -> {
+                    if (rawKeyField != null && !TextUtils.isEmpty(text)) {
+                        String key = text.trim();
+                        rawKeyField.setText(key);
+                        rawKeyField.setSelection(rawKeyField.getText().length());
+                    }
+                });
+            }
+        });
     }
 
     private EditTextBoldCursor createField(Context context, String hint) {
