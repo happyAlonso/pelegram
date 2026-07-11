@@ -24,7 +24,7 @@ import java.nio.charset.StandardCharsets;
 public class ApplicationLoaderImpl extends ApplicationLoader {
 
     // Fork version = the release tag without the leading "v". Bump on every release.
-    private static final String CURRENT_VERSION = "1.0.15";
+    private static final String CURRENT_VERSION = "1.0.16";
     // The list endpoint (newest first) rather than /latest, so prereleases are picked up too.
     private static final String RELEASES_API = "https://api.github.com/repos/happyAlonso/pelegram/releases?per_page=10";
 
