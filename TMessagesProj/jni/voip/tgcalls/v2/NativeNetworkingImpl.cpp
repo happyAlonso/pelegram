@@ -597,9 +597,7 @@ void NativeNetworkingImpl::resetDtlsSrtpTransport() {
         cricket::PORTALLOCATOR_ENABLE_IPV6 |
         cricket::PORTALLOCATOR_ENABLE_IPV6_ON_WIFI;
 
-    // When routing through a proxy we need TCP candidates (UDP/STUN get disabled below and the SOCKS5
-    // proxy can only carry TCP), so don't disable TCP in that case.
-    if (!_enableTCP && !_proxy) {
+    if (!_enableTCP) {
         flags |= cricket::PORTALLOCATOR_DISABLE_TCP;
     }
 
@@ -616,16 +614,6 @@ void NativeNetworkingImpl::resetDtlsSrtpTransport() {
     _portAllocator->set_flags(flags);
     _portAllocator->Initialize();
 
-    if (_proxy) {
-        // Actually tunnel the call's TURN/TCP sockets through the SOCKS5 proxy. Without this the proxy
-        // field only disabled UDP and the call had no way to connect (stuck on "connecting").
-        rtc::ProxyInfo proxyInfo;
-        proxyInfo.type = rtc::PROXY_SOCKS5;
-        proxyInfo.address = rtc::SocketAddress(_proxy->host, _proxy->port);
-        proxyInfo.username = _proxy->login;
-        _portAllocator->set_proxy("tgcalls", proxyInfo);
-    }
-
     cricket::ServerAddresses stunServers;
     std::vector<cricket::RelayServerConfig> turnServers;
 
@@ -635,9 +623,7 @@ void NativeNetworkingImpl::resetDtlsSrtpTransport() {
                 rtc::SocketAddress(server.host, server.port),
                 server.login,
                 server.password,
-                // through a proxy the relay must be reached over TCP (UDP is disabled and can't be
-                // carried by SOCKS5 CONNECT), so force TCP for every relay in that case.
-                (_proxy || server.isTcp) ? cricket::PROTO_TCP : cricket::PROTO_UDP
+                server.isTcp ? cricket::PROTO_TCP : cricket::PROTO_UDP
             ));
         } else {
             rtc::SocketAddress stunAddress = rtc::SocketAddress(server.host, server.port);

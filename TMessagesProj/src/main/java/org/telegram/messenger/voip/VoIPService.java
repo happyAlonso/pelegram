@@ -3424,11 +3424,16 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 			// persistent state
 			final String persistentStateFilePath = new File(ApplicationLoader.applicationContext.getCacheDir(), "voip_persistent_state.json").getAbsolutePath();
 
-			// route call media through the embedded VPN when the user opted in. SOCKS5 can only carry the
-			// call over TCP relays (no UDP/P2P), so this also forces TCP endpoints below.
-			final boolean routeCallsThroughVpn = VpnController.getInstance().shouldRouteCalls();
+			// Route call media through the embedded VPN when the user opted in. Only the legacy libtgvoip
+			// engine (2.4.4) can carry a call over the SOCKS5 proxy - the modern engine's webrtc has the
+			// SOCKS path stripped out - so this is only possible when the negotiated protocol still offers
+			// 2.4.4. If it doesn't, fall back to a normal direct call rather than a broken proxied one.
+			final boolean routeCallsThroughVpn = VpnController.getInstance().shouldRouteCalls()
+					&& privateCall.protocol.library_versions.contains("2.4.4");
+			// Force the legacy engine for a proxied call; keep the peer's preferred version otherwise.
+			final String callVersion = routeCallsThroughVpn ? "2.4.4" : privateCall.protocol.library_versions.get(0);
 
-			// endpoints
+			// endpoints - a proxied call uses TCP relays (SOCKS5 CONNECT) for a reliable path.
 			final boolean dbgForceTcp = preferences.getBoolean("dbg_force_tcp_in_calls", false);
 			final boolean forceTcp = dbgForceTcp || routeCallsThroughVpn;
 			final int endpointType = forceTcp ? Instance.ENDPOINT_TYPE_TCP_RELAY : Instance.ENDPOINT_TYPE_UDP_RELAY;
@@ -3471,7 +3476,7 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 			// encryption key
 			final Instance.EncryptionKey encryptionKey = new Instance.EncryptionKey(authKey, isOutgoing);
 
-			boolean newAvailable = "2.7.7".compareTo(privateCall.protocol.library_versions.get(0)) <= 0;
+			boolean newAvailable = "2.7.7".compareTo(callVersion) <= 0;
 			if (captureDevice[CAPTURE_DEVICE_CAMERA] != 0 && !newAvailable) {
 				NativeInstance.destroyVideoCapturer(captureDevice[CAPTURE_DEVICE_CAMERA]);
 				captureDevice[CAPTURE_DEVICE_CAMERA] = 0;
@@ -3486,7 +3491,7 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 				}
 			}
 			// init
-			tgVoip[CAPTURE_DEVICE_CAMERA] = Instance.makeInstance(privateCall.protocol.library_versions.get(0), config, persistentStateFilePath, endpoints, proxy, getNetworkType(), encryptionKey, remoteSink[CAPTURE_DEVICE_CAMERA], captureDevice[CAPTURE_DEVICE_CAMERA], (uids, levels, voice) -> {
+			tgVoip[CAPTURE_DEVICE_CAMERA] = Instance.makeInstance(callVersion, config, persistentStateFilePath, endpoints, proxy, getNetworkType(), encryptionKey, remoteSink[CAPTURE_DEVICE_CAMERA], captureDevice[CAPTURE_DEVICE_CAMERA], (uids, levels, voice) -> {
 				if (sharedInstance == null || privateCall == null) {
 					return;
 				}
