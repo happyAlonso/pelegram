@@ -150,9 +150,13 @@ public class SingBoxConfigBuilder {
     /** Parse just the outbound object for a key (also used for pre-connect URLTest). */
     public static JSONObject buildOutbound(String rawKey) throws Exception {
         String key = rawKey.trim();
-        // An edited connection is stored as a ready sing-box outbound JSON.
+        // An edited connection is stored as a ready sing-box outbound JSON; an AmneziaVPN QR
+        // decodes to its config JSON (with "containers").
         if (key.startsWith("{")) {
             JSONObject o = new JSONObject(key);
+            if (o.has("containers")) {
+                return parseAmneziaContainers(o);
+            }
             o.put("tag", TAG_PROXY);
             return o;
         }
@@ -386,8 +390,11 @@ public class SingBoxConfigBuilder {
         String b64 = key.substring("vpn://".length()).trim();
         byte[] compressed = Base64.decode(b64, Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
         byte[] json = qUncompress(compressed);
-        JSONObject root = new JSONObject(new String(json, StandardCharsets.UTF_8));
+        return parseAmneziaContainers(new JSONObject(new String(json, StandardCharsets.UTF_8)));
+    }
 
+    // AmneziaVPN config JSON: {"containers":[{"awg":{"last_config":"{...,config:<awg-quick>}"}}], ..}
+    private static JSONObject parseAmneziaContainers(JSONObject root) throws Exception {
         JSONArray containers = root.getJSONArray("containers");
         String def = root.optString("defaultContainer", null);
         JSONObject awg = null;
@@ -482,11 +489,12 @@ public class SingBoxConfigBuilder {
     }
 
     /** Turn reassembled chunk data into a key string that {@link #buildOutbound} understands. */
-    public static String amneziaQrToKey(byte[] blob) {
-        // Qt qCompress -> route through the existing vpn:// (base64 + qUncompress) handler; otherwise
-        // it is a raw awg-quick [Interface] config, handled directly.
+    public static String amneziaQrToKey(byte[] blob) throws Exception {
+        // Qt qCompress'd -> decompress to the AmneziaVPN config JSON (buildOutbound routes it by its
+        // "containers" field). No base64 round-trip - that mangled the data across alphabets.
+        // Otherwise it is a raw awg-quick [Interface] config, used as-is.
         if (blob.length > 8 && (blob[0] & 0xff) == 0x00 && (blob[4] & 0xff) == 0x78) {
-            return "vpn://" + Base64.encodeToString(blob, Base64.NO_WRAP);
+            return new String(qUncompress(blob), StandardCharsets.UTF_8);
         }
         return new String(blob, StandardCharsets.UTF_8);
     }
