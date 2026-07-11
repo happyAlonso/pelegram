@@ -24,9 +24,10 @@ import java.nio.charset.StandardCharsets;
 public class ApplicationLoaderImpl extends ApplicationLoader {
 
     // Fork version = the release tag without the leading "v". Bump on every release.
-    private static final String CURRENT_VERSION = "1.0.19";
-    // The list endpoint (newest first) rather than /latest, so prereleases are picked up too.
-    private static final String RELEASES_API = "https://api.github.com/repos/happyAlonso/pelegram/releases?per_page=10";
+    private static final String CURRENT_VERSION = "1.0.20";
+    // /releases/latest returns only the newest full release (GitHub excludes prereleases and
+    // drafts), so the in-app updater never offers a test prerelease - only promoted prod builds.
+    private static final String RELEASES_API = "https://api.github.com/repos/happyAlonso/pelegram/releases/latest";
 
     private volatile BetaUpdate pendingUpdate;
     private volatile String pendingApkUrl;
@@ -82,16 +83,8 @@ public class ApplicationLoaderImpl extends ApplicationLoader {
             BetaUpdate update = null;
             String apkUrl = null;
             try {
-                JSONArray releases = new JSONArray(httpGetString(RELEASES_API));
-                JSONObject root = null;
-                for (int i = 0; i < releases.length(); i++) {
-                    JSONObject r = releases.getJSONObject(i);
-                    if (!r.optBoolean("draft", false)) { // newest non-draft (prereleases included)
-                        root = r;
-                        break;
-                    }
-                }
-                if (root != null) {
+                JSONObject root = new JSONObject(httpGetString(RELEASES_API));
+                if (!root.optBoolean("prerelease", false) && !root.optBoolean("draft", false)) {
                     String tag = root.optString("tag_name", "");
                     String version = (tag.startsWith("v") || tag.startsWith("V")) ? tag.substring(1) : tag;
                     String changelog = root.optString("body", "");
