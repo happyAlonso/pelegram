@@ -20,9 +20,16 @@ prefix.
 
 ## Files
 
-- `sing-shadowsocks2-v0.2.1-salt-prefix.patch` - adds `Method.SetSaltPrefix([]byte)` to
-  `github.com/sagernet/sing-shadowsocks2@v0.2.1` (`shadowaead/method.go`); the client's
-  `writeRequest` writes the prefix ahead of the random salt tail.
+- `sing-shadowsocks2-v0.2.1-salt-prefix.patch` - patches
+  `github.com/sagernet/sing-shadowsocks2@v0.2.1` (`shadowaead/method.go`) with two things:
+  - `Method.SetSaltPrefix([]byte)` - the client's `writeRequest` writes the prefix ahead of
+    the random salt tail.
+  - a `coalesceConn` wrapper (used only when a prefix is set) that holds the first writes for
+    up to 10ms so the salt + address + first client payload ship in ONE TCP segment. Without
+    it, sing-box sends a ~86-byte salt+address-only first packet, which is itself the
+    Shadowsocks fingerprint DPI blocks - the prefix bytes are then irrelevant. This mirrors
+    Outline's `ClientDataWait` (10ms). Verified on the wire: first data segment goes from
+    86 bytes (header only) to ~1.7KB (header + payload), matching Outline.
 - `sing-box-lx-shadowsocks-prefix.patch` - wires it into sing-box: a base64 `prefix`
   option on the shadowsocks outbound, decoded and pushed via `SetSaltPrefix` (erroring if
   unsupported), plus the local `replace` pointing at the patched v2 module.

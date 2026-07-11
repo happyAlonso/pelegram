@@ -1,6 +1,15 @@
 --- a/shadowaead/method.go
 +++ b/shadowaead/method.go
-@@ -38,6 +38,15 @@
+@@ -5,6 +5,8 @@
+ 	"crypto/aes"
+ 	"crypto/cipher"
+ 	"net"
++	"sync"
++	"time"
+ 
+ 	C "github.com/sagernet/sing-shadowsocks2/cipher"
+ 	"github.com/sagernet/sing-shadowsocks2/internal/legacykey"
+@@ -38,6 +40,93 @@
  	keySaltLength int
  	constructor   func(key []byte) (cipher.AEAD, error)
  	key           []byte
@@ -13,10 +22,106 @@
 +// Ignored when the prefix is empty or not shorter than the salt.
 +func (m *Method) SetSaltPrefix(prefix []byte) {
 +	m.saltPrefix = prefix
++}
++
++// maybeCoalesce wraps the server connection so the salt+address and the first client payload ship
++// in one TCP segment (see coalesceConn). Only applied with the Outline prefix disguise, since a
++// header-only first packet is exactly the Shadowsocks fingerprint the prefix is meant to hide.
++func (m *Method) maybeCoalesce(conn net.Conn) net.Conn {
++	if len(m.saltPrefix) > 0 {
++		return newCoalesceConn(conn)
++	}
++	return conn
++}
++
++// coalesceConn holds the first outbound writes for a short window so the Shadowsocks salt and the
++// encrypted address chunk go out in the same TCP segment as the first client payload, instead of a
++// tell-tale header-only first packet. This mirrors Outline's ClientDataWait (10ms). After the first
++// flush it is a plain pass-through.
++type coalesceConn struct {
++	net.Conn
++	mu      sync.Mutex
++	buf     []byte
++	writes  int
++	flushed bool
++	timer   *time.Timer
++}
++
++const (
++	coalesceWait      = 10 * time.Millisecond
++	coalesceFlushSize = 1024
++)
++
++func newCoalesceConn(conn net.Conn) *coalesceConn {
++	return &coalesceConn{Conn: conn}
++}
++
++func (c *coalesceConn) Write(p []byte) (int, error) {
++	c.mu.Lock()
++	if c.flushed {
++		c.mu.Unlock()
++		return c.Conn.Write(p)
++	}
++	c.buf = append(c.buf, p...)
++	c.writes++
++	// Flush once the header has been joined by the first data write (writes >= 2) or enough bytes
++	// have accumulated; otherwise the timer flushes a header-only request after the wait.
++	if c.writes >= 2 || len(c.buf) >= coalesceFlushSize {
++		c.mu.Unlock()
++		return len(p), c.flush()
++	}
++	if c.timer == nil {
++		c.timer = time.AfterFunc(coalesceWait, func() { c.flush() })
++	}
++	c.mu.Unlock()
++	return len(p), nil
++}
++
++func (c *coalesceConn) flush() error {
++	c.mu.Lock()
++	if c.flushed {
++		c.mu.Unlock()
++		return nil
++	}
++	c.flushed = true
++	if c.timer != nil {
++		c.timer.Stop()
++	}
++	data := c.buf
++	c.buf = nil
++	c.mu.Unlock()
++	if len(data) > 0 {
++		_, err := c.Conn.Write(data)
++		return err
++	}
++	return nil
++}
++
++func (c *coalesceConn) Close() error {
++	c.flush()
++	return c.Conn.Close()
  }
  
  func NewMethod(ctx context.Context, methodName string, options C.MethodOptions) (*Method, error) {
-@@ -121,7 +130,12 @@
+@@ -83,7 +172,7 @@
+ 
+ func (m *Method) DialConn(conn net.Conn, destination M.Socksaddr) (net.Conn, error) {
+ 	ssConn := &clientConn{
+-		Conn:        conn,
++		Conn:        m.maybeCoalesce(conn),
+ 		method:      m,
+ 		destination: destination,
+ 	}
+@@ -92,7 +181,7 @@
+ 
+ func (m *Method) DialEarlyConn(conn net.Conn, destination M.Socksaddr) net.Conn {
+ 	return &clientConn{
+-		Conn:        conn,
++		Conn:        m.maybeCoalesce(conn),
+ 		method:      m,
+ 		destination: destination,
+ 	}
+@@ -121,7 +210,12 @@
  
  func (c *clientConn) writeRequest(payload []byte) error {
  	requestBuffer := buf.New()

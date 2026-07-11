@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="AppName">pelegram</string>
-    <string name="AppNameBeta">pelegram</string>
+    <string name="AppName">Pelegram</string>
+    <string name="AppNameBeta">Pelegram</string>
     <string name="LanguageName">English</string>
     <string name="Vpn">VPN</string>
     <string name="VpnSettings">VPN Settings</string>
