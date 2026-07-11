@@ -440,6 +440,57 @@ public class SingBoxConfigBuilder {
         return out.toByteArray();
     }
 
+    // --- AmneziaVPN QR codes ---
+    // Payload = base64url of: magic(0x07 0xC0) + count(1) + index(1) + dataLen(uint32 BE) + data.
+    // A large config is split across `count` codes; concatenate `data` by `index`. The reassembled
+    // blob is either a Qt qCompress'd Amnezia JSON ([uint32 len][zlib 0x78..]) or raw awg-quick text.
+
+    private static byte[] amneziaQrRaw(String qrText) {
+        if (qrText == null || qrText.length() < 12) {
+            return null;
+        }
+        try {
+            byte[] raw = b64decode(qrText.trim());
+            if (raw.length >= 8 && (raw[0] & 0xff) == 0x07 && (raw[1] & 0xff) == 0xc0) {
+                return raw;
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    /** If qrText is an AmneziaVPN chunk, returns {count, index}; otherwise null. */
+    public static int[] amneziaQrParts(String qrText) {
+        byte[] raw = amneziaQrRaw(qrText);
+        if (raw == null) {
+            return null;
+        }
+        return new int[]{raw[2] & 0xff, raw[3] & 0xff};
+    }
+
+    /** The data payload of an AmneziaVPN chunk (without the 8-byte header), or null. */
+    public static byte[] amneziaQrChunkData(String qrText) {
+        byte[] raw = amneziaQrRaw(qrText);
+        if (raw == null) {
+            return null;
+        }
+        int len = ((raw[4] & 0xff) << 24) | ((raw[5] & 0xff) << 16) | ((raw[6] & 0xff) << 8) | (raw[7] & 0xff);
+        int end = len >= 0 && 8 + len <= raw.length ? 8 + len : raw.length;
+        byte[] data = new byte[end - 8];
+        System.arraycopy(raw, 8, data, 0, data.length);
+        return data;
+    }
+
+    /** Turn reassembled chunk data into a key string that {@link #buildOutbound} understands. */
+    public static String amneziaQrToKey(byte[] blob) {
+        // Qt qCompress -> route through the existing vpn:// (base64 + qUncompress) handler; otherwise
+        // it is a raw awg-quick [Interface] config, handled directly.
+        if (blob.length > 8 && (blob[0] & 0xff) == 0x00 && (blob[4] & 0xff) == 0x78) {
+            return "vpn://" + Base64.encodeToString(blob, Base64.NO_WRAP);
+        }
+        return new String(blob, StandardCharsets.UTF_8);
+    }
+
     // AmneziaWG: awg-quick .conf text ([Interface]/[Peer] with Jc/Jmin/Jmax/S1../H1.. keys).
     // Emits a sing-box `wireguard` endpoint-style outbound with the lx-fork awg fields.
     private static JSONObject parseAmneziaWg(String conf) throws Exception {

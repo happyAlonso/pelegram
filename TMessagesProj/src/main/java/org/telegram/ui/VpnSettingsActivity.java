@@ -2,7 +2,11 @@ package org.telegram.ui;
 
 import static org.telegram.messenger.LocaleController.getString;
 
+import android.Manifest;
 import android.content.Context;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.os.Build;
 import android.text.InputType;
 import android.text.TextUtils;
 import android.util.TypedValue;
@@ -18,6 +22,7 @@ import android.widget.Toast;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.telegram.messenger.AndroidUtilities;
+import org.telegram.messenger.FileLog;
 import org.telegram.messenger.LocaleController;
 import org.telegram.messenger.R;
 import org.telegram.messenger.vpn.SingBoxConfigBuilder;
@@ -25,12 +30,14 @@ import org.telegram.messenger.vpn.VpnController;
 import org.telegram.messenger.vpn.VpnKeyInfo;
 import org.telegram.ui.ActionBar.ActionBar;
 import org.telegram.ui.ActionBar.ActionBarMenuItem;
+import org.telegram.ui.ActionBar.AlertDialog;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.Theme;
 import org.telegram.ui.Cells.TextInfoPrivacyCell;
 import org.telegram.ui.Components.EditTextBoldCursor;
 import org.telegram.ui.Components.LayoutHelper;
 
+import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -41,6 +48,12 @@ public class VpnSettingsActivity extends BaseFragment {
 
     private static final int done_button = 1;
     private static final int scan_button = 2;
+    private static final int CAMERA_PERMISSION_REQUEST_CODE = 3;
+
+    // AmneziaVPN QR codes carry a chunk header and may split a config across several codes; collect
+    // them here until every part is scanned.
+    private final HashMap<Integer, byte[]> qrChunks = new HashMap<>();
+    private int qrChunkCount = 0;
 
     private static final int KIND_STRING = 0;
     private static final int KIND_NUMBER = 1;
@@ -192,18 +205,98 @@ public class VpnSettingsActivity extends BaseFragment {
         if (getParentActivity() == null) {
             return;
         }
+        if (Build.VERSION.SDK_INT >= 23 && getParentActivity().checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            getParentActivity().requestPermissions(new String[]{Manifest.permission.CAMERA}, CAMERA_PERMISSION_REQUEST_CODE);
+            return;
+        }
         CameraScanActivity.showAsSheet(this, false, CameraScanActivity.TYPE_QR, new CameraScanActivity.CameraScanActivityDelegate() {
             @Override
             public void didFindQr(String text) {
-                AndroidUtilities.runOnUIThread(() -> {
-                    if (rawKeyField != null && !TextUtils.isEmpty(text)) {
-                        String key = text.trim();
-                        rawKeyField.setText(key);
-                        rawKeyField.setSelection(rawKeyField.getText().length());
-                    }
-                });
+                AndroidUtilities.runOnUIThread(() -> onQrScanned(text));
             }
         });
+    }
+
+    @Override
+    public void onRequestPermissionsResultFragment(int requestCode, String[] permissions, int[] grantResults) {
+        if (getParentActivity() == null) {
+            return;
+        }
+        if (requestCode == CAMERA_PERMISSION_REQUEST_CODE) {
+            if (grantResults != null && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                openQrScanner();
+            } else {
+                new AlertDialog.Builder(getParentActivity())
+                        .setMessage(AndroidUtilities.replaceTags(getString(R.string.QRCodePermissionNoCameraWithHint)))
+                        .setPositiveButton(getString(R.string.PermissionOpenSettings), (dialog, which) -> {
+                            try {
+                                Intent intent = new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                                intent.setData(android.net.Uri.parse("package:" + getParentActivity().getPackageName()));
+                                getParentActivity().startActivity(intent);
+                            } catch (Exception e) {
+                                FileLog.e(e);
+                            }
+                        })
+                        .setNegativeButton(getString(R.string.ContactsPermissionAlertNotNow), null)
+                        .show();
+            }
+        }
+    }
+
+    // Handle a scanned QR: a plain key (ss://, vless://, ...) goes straight into the field; an
+    // AmneziaVPN chunk is collected (and, if split, the scanner reopens) until every part is in,
+    // then the reassembled config is filled in.
+    private void onQrScanned(String text) {
+        if (TextUtils.isEmpty(text)) {
+            return;
+        }
+        int[] parts = SingBoxConfigBuilder.amneziaQrParts(text);
+        if (parts == null) {
+            qrChunks.clear();
+            setRawKey(text.trim());
+            return;
+        }
+        int count = parts[0], index = parts[1];
+        if (count <= 0) {
+            return;
+        }
+        if (qrChunkCount != count) {
+            qrChunks.clear();
+        }
+        qrChunkCount = count;
+        byte[] data = SingBoxConfigBuilder.amneziaQrChunkData(text);
+        if (data != null) {
+            qrChunks.put(index, data);
+        }
+        if (qrChunks.size() < count) {
+            if (getParentActivity() != null) {
+                Toast.makeText(getParentActivity(), LocaleController.formatString(R.string.VpnQrPart, qrChunks.size(), count), Toast.LENGTH_SHORT).show();
+            }
+            AndroidUtilities.runOnUIThread(this::openQrScanner, 350);
+            return;
+        }
+        try {
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            for (int i = 0; i < count; i++) {
+                byte[] d = qrChunks.get(i);
+                if (d != null) {
+                    bos.write(d);
+                }
+            }
+            setRawKey(SingBoxConfigBuilder.amneziaQrToKey(bos.toByteArray()));
+        } catch (Exception e) {
+            FileLog.e(e);
+        } finally {
+            qrChunks.clear();
+            qrChunkCount = 0;
+        }
+    }
+
+    private void setRawKey(String key) {
+        if (rawKeyField != null && !TextUtils.isEmpty(key)) {
+            rawKeyField.setText(key);
+            rawKeyField.setSelection(rawKeyField.getText().length());
+        }
     }
 
     private EditTextBoldCursor createField(Context context, String hint) {

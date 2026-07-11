@@ -626,11 +626,11 @@ public class DialogStoriesCell extends FrameLayout implements NotificationCenter
                     currentTitle = str;
                 }
             } else {
-                currentTitle = menuItemsOffset < dp(50) ? null :
+                currentTitle = menuItemsOffset < dp(50) ? getString(R.string.AppName) :
                     LocaleController.getString(R.string.MyStory);
             }
         } else {
-            currentTitle = menuItemsOffset < dp(50) ? null :
+            currentTitle = menuItemsOffset < dp(50) ? getString(R.string.AppName) :
                 LocaleController.formatPluralString("Stories", totalCount);
         }
 
