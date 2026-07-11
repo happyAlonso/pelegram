@@ -69,6 +69,8 @@ public class VpnListActivity extends BaseFragment implements VpnController.Liste
     @Keep private int autoSwitchRow;
     private int autoSwitchTimeoutRow;
     private int autoSwitchInfoRow;
+    @Keep private int routeCallsRow;
+    private int routeCallsInfoRow;
     private int useVpnShadowRow;
     private int connectionsHeaderRow;
     private int vpnStartRow;
@@ -191,6 +193,10 @@ public class VpnListActivity extends BaseFragment implements VpnController.Liste
             c.setAutoSwitch(value);
             ((TextCheckCell) view).setChecked(value);
             updateRows(true);
+        } else if (position == routeCallsRow) {
+            boolean value = !c.isRouteCalls();
+            c.setRouteCalls(value);
+            ((TextCheckCell) view).setChecked(value);
         } else if (position == addVpnRow) {
             presentFragment(new VpnSettingsActivity());
         } else if (position >= vpnStartRow && vpnStartRow >= 0 && position < vpnEndRow) {
@@ -276,12 +282,17 @@ public class VpnListActivity extends BaseFragment implements VpnController.Liste
                 autoSwitchTimeoutRow = -1;
                 autoSwitchInfoRow = -1;
             }
+            routeCallsRow = rowCount++;
+            routeCallsInfoRow = rowCount++;
         } else {
             autoSwitchRow = -1;
             autoSwitchTimeoutRow = -1;
             autoSwitchInfoRow = -1;
+            routeCallsRow = -1;
+            routeCallsInfoRow = -1;
         }
-        useVpnShadowRow = autoSwitchInfoRow == -1 ? rowCount++ : -1;
+        // when the VPN is on, routeCallsInfoRow is the section footer; otherwise a plain shadow is.
+        useVpnShadowRow = c.isEnabled() ? -1 : rowCount++;
         connectionsHeaderRow = rowCount++;
         if (!c.vpnList.isEmpty()) {
             vpnStartRow = rowCount;
@@ -568,7 +579,7 @@ public class VpnListActivity extends BaseFragment implements VpnController.Liste
         @Override
         public boolean isEnabled(RecyclerView.ViewHolder holder) {
             int position = holder.getAdapterPosition();
-            return position == useVpnRow || position == autoSwitchRow || position == addVpnRow
+            return position == useVpnRow || position == autoSwitchRow || position == routeCallsRow || position == addVpnRow
                     || (position >= vpnStartRow && vpnStartRow >= 0 && position < vpnEndRow);
         }
 
@@ -576,11 +587,11 @@ public class VpnListActivity extends BaseFragment implements VpnController.Liste
         public int getItemViewType(int position) {
             if (position == useVpnShadowRow || position == vpnShadowRow) {
                 return VIEW_TYPE_SHADOW;
-            } else if (position == useVpnRow || position == autoSwitchRow) {
+            } else if (position == useVpnRow || position == autoSwitchRow || position == routeCallsRow) {
                 return VIEW_TYPE_CHECK;
             } else if (position == connectionsHeaderRow) {
                 return VIEW_TYPE_HEADER;
-            } else if (position == infoRow || position == autoSwitchInfoRow) {
+            } else if (position == infoRow || position == autoSwitchInfoRow || position == routeCallsInfoRow) {
                 return VIEW_TYPE_INFO;
             } else if (position == autoSwitchTimeoutRow) {
                 return VIEW_TYPE_SLIDER;
@@ -637,6 +648,8 @@ public class VpnListActivity extends BaseFragment implements VpnController.Liste
                         cell.setTextAndCheck(getString(R.string.UseVpn), c.isEnabled(), autoSwitchRow != -1);
                     } else if (position == autoSwitchRow) {
                         cell.setTextAndCheck(getString(R.string.VpnAutoSwitch), c.isAutoSwitch(), c.isAutoSwitch());
+                    } else if (position == routeCallsRow) {
+                        cell.setTextAndCheck(getString(R.string.VpnRouteCalls), c.isRouteCalls(), false);
                     }
                     break;
                 }
@@ -647,6 +660,8 @@ public class VpnListActivity extends BaseFragment implements VpnController.Liste
                     TextInfoPrivacyCell cell = (TextInfoPrivacyCell) holder.itemView;
                     if (position == autoSwitchInfoRow) {
                         cell.setText(getString(R.string.VpnAutoSwitchInfo));
+                    } else if (position == routeCallsInfoRow) {
+                        cell.setText(getString(R.string.VpnRouteCallsInfo));
                     } else {
                         cell.setText(getString(R.string.VpnInfo));
                     }

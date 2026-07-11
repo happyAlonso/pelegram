@@ -49,6 +49,7 @@ public class VpnController implements SingBoxManager.StateListener {
     public VpnKeyInfo currentVpn;
     private boolean enabled;
     private boolean autoSwitch;
+    private boolean routeCalls;
     private int autoSwitchTimeoutIndex = 1; // default 10s
     private boolean loaded;
 
@@ -72,6 +73,7 @@ public class VpnController implements SingBoxManager.StateListener {
         SharedPreferences p = prefs();
         enabled = p.getBoolean("enabled", false);
         autoSwitch = p.getBoolean("autoswitch", false);
+        routeCalls = p.getBoolean("route_calls", false);
         autoSwitchTimeoutIndex = p.getInt("autoswitch_timeout", 1);
         try {
             JSONArray arr = new JSONArray(p.getString("list", "[]"));
@@ -111,6 +113,7 @@ public class VpnController implements SingBoxManager.StateListener {
                 .putString("list", arr.toString())
                 .putBoolean("enabled", enabled)
                 .putBoolean("autoswitch", autoSwitch)
+                .putBoolean("route_calls", routeCalls)
                 .putInt("autoswitch_timeout", autoSwitchTimeoutIndex)
                 .putInt("current", currentVpn == null ? -1 : vpnList.indexOf(currentVpn))
                 .apply();
@@ -127,6 +130,31 @@ public class VpnController implements SingBoxManager.StateListener {
     public void setAutoSwitch(boolean value) {
         autoSwitch = value;
         save();
+    }
+
+    public boolean isRouteCalls() {
+        return routeCalls;
+    }
+
+    public void setRouteCalls(boolean value) {
+        routeCalls = value;
+        save();
+    }
+
+    /**
+     * Whether an active call's media should be sent through the embedded proxy right now. Requires the
+     * VPN to be on, the user to have opted in, and the core to be actually connected with a live SOCKS
+     * port - otherwise the call must go direct.
+     */
+    public boolean shouldRouteCalls() {
+        return isEnabled() && routeCalls
+                && SingBoxManager.getInstance().getState() == SingBoxManager.STATE_CONNECTED
+                && SingBoxManager.getInstance().getLocalPort() > 0;
+    }
+
+    /** Local SOCKS5 port the sing-box core is listening on (0 if not connected). */
+    public int getProxyPort() {
+        return SingBoxManager.getInstance().getLocalPort();
     }
 
     public int getAutoSwitchTimeoutIndex() {

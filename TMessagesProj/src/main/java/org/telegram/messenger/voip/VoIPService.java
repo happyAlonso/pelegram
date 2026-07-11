@@ -118,6 +118,7 @@ import org.telegram.messenger.UserObject;
 import org.telegram.messenger.Utilities;
 import org.telegram.messenger.XiaomiUtilities;
 import org.telegram.messenger.utils.tlutils.TlUtils;
+import org.telegram.messenger.vpn.VpnController;
 import org.telegram.tgnet.ConnectionsManager;
 import org.telegram.tgnet.SerializedData;
 import org.telegram.tgnet.TLObject;
@@ -3423,8 +3424,13 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 			// persistent state
 			final String persistentStateFilePath = new File(ApplicationLoader.applicationContext.getCacheDir(), "voip_persistent_state.json").getAbsolutePath();
 
+			// route call media through the embedded VPN when the user opted in. SOCKS5 can only carry the
+			// call over TCP relays (no UDP/P2P), so this also forces TCP endpoints below.
+			final boolean routeCallsThroughVpn = VpnController.getInstance().shouldRouteCalls();
+
 			// endpoints
-			final boolean forceTcp = preferences.getBoolean("dbg_force_tcp_in_calls", false);
+			final boolean dbgForceTcp = preferences.getBoolean("dbg_force_tcp_in_calls", false);
+			final boolean forceTcp = dbgForceTcp || routeCallsThroughVpn;
 			final int endpointType = forceTcp ? Instance.ENDPOINT_TYPE_TCP_RELAY : Instance.ENDPOINT_TYPE_UDP_RELAY;
 			final Instance.Endpoint[] endpoints = new Instance.Endpoint[privateCall.connections.size()];
 			ArrayList<Long> reflectorIds = new ArrayList<>();
@@ -3445,13 +3451,16 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 					endpoints[i].reflectorId = reflectorIdMapping.getOrDefault(endpoints[i].id, 0);
 				}
 			}
-			if (forceTcp) {
+			if (dbgForceTcp) {
 				AndroidUtilities.runOnUIThread(() -> Toast.makeText(VoIPService.this, "This call uses TCP which will degrade its quality.", Toast.LENGTH_SHORT).show());
 			}
 
 			// proxy
 			Instance.Proxy proxy = null;
-			if (preferences.getBoolean("proxy_enabled", false) && preferences.getBoolean("proxy_enabled_calls", false)) {
+			if (routeCallsThroughVpn) {
+				// send the call to the local sing-box SOCKS5 inbound (no auth)
+				proxy = new Instance.Proxy("127.0.0.1", VpnController.getInstance().getProxyPort(), "", "");
+			} else if (preferences.getBoolean("proxy_enabled", false) && preferences.getBoolean("proxy_enabled_calls", false)) {
 				final String server = preferences.getString("proxy_ip", null);
 				final String secret = preferences.getString("proxy_secret", null);
 				if (!TextUtils.isEmpty(server) && TextUtils.isEmpty(secret)) {
