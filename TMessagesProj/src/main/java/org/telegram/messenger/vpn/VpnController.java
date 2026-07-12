@@ -298,6 +298,22 @@ public class VpnController implements SingBoxManager.StateListener {
     }
 
     private void measurePing() {
+        measurePing(false);
+    }
+
+    /**
+     * Ping the current connection through the local proxy to show its latency/availability. When
+     * {@code allowAutoSwitch} is set (periodic health check only) a failure rolls over to the next
+     * connection.
+     *
+     * We deliberately do NOT auto-switch on the connect-time ping: the core reports "connected" the
+     * instant it starts, before the server has finished its handshake, so an immediate ping usually
+     * fails - and since every switch tears the proxy down and starts a new one, switching on it would
+     * tight-loop through every connection without any of them getting a chance to come up (exactly the
+     * runaway the user hit). Only the periodic health check switches, and it fires a full interval
+     * after connecting, giving each server time to become reachable first.
+     */
+    private void measurePing(boolean allowAutoSwitch) {
         final VpnKeyInfo info = currentVpn;
         int port = SingBoxManager.getInstance().getLocalPort();
         if (info == null || port <= 0) {
@@ -310,11 +326,10 @@ public class VpnController implements SingBoxManager.StateListener {
             if (time == -1) {
                 info.available = false;
                 info.ping = 0;
-                // The core reports "connected" the moment it starts, even if the server is dead or
-                // blocked - startInternal only fails on a bad config, not on an unreachable server. This
-                // proxy ping is the real reachability check, so a failure here is what drives auto-switch
-                // (STATE_ERROR alone almost never fires for a blocked server).
-                if (enabled && autoSwitch && info == currentVpn && vpnList.size() > 1) {
+                // Only the periodic health check switches, and only if we're still connected to the same
+                // server it just tested (guards against switching during a transition).
+                if (allowAutoSwitch && enabled && autoSwitch && info == currentVpn && vpnList.size() > 1
+                        && SingBoxManager.getInstance().getState() == SingBoxManager.STATE_CONNECTED) {
                     switchToNext();
                 }
             } else {
@@ -345,8 +360,8 @@ public class VpnController implements SingBoxManager.StateListener {
                 || SingBoxManager.getInstance().getState() != SingBoxManager.STATE_CONNECTED) {
             return;
         }
-        // measurePing() switches to the next connection if this one has stopped responding.
-        measurePing();
+        // measurePing(true) switches to the next connection if this one has stopped responding.
+        measurePing(true);
         scheduleHealthCheck();
     }
 
