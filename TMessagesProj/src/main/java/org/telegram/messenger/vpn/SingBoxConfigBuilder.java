@@ -57,12 +57,29 @@ public class SingBoxConfigBuilder {
         // Everything from the socks inbound leaves via the proxy outbound/endpoint (by tag).
         route.put("final", TAG_PROXY);
 
+        // DNS: the core's Android default resolver points at a dead local :53, so any traffic where the
+        // core has to resolve a hostname itself fails ("connection refused ... [::1]:53"). tgnet/calls
+        // dodge this by handing the core raw IPs, but the routed in-app browser sends CONNECT/GET with a
+        // hostname (myip.ru), which the core must resolve - it 502'd ("Bad gateway") without this. Point
+        // DNS at a public resolver reached THROUGH the tunnel (detour = proxy-out): remote resolution, no
+        // leak, and it works wherever the tunnel does. New (1.12+) typed-server schema.
+        JSONObject dnsServer = new JSONObject();
+        dnsServer.put("type", "udp");
+        dnsServer.put("tag", "proxy-dns");
+        dnsServer.put("server", "1.1.1.1");
+        dnsServer.put("detour", TAG_PROXY);
+        JSONObject dns = new JSONObject();
+        dns.put("servers", new JSONArray().put(dnsServer));
+        dns.put("final", "proxy-dns");
+        dns.put("strategy", "ipv4_only");
+
         JSONObject log = new JSONObject();
         log.put("level", "info");
         log.put("timestamp", true);
 
         JSONObject root = new JSONObject();
         root.put("log", log);
+        root.put("dns", dns);
         root.put("inbounds", new JSONArray().put(socksIn));
         // wireguard (incl. AmneziaWG) is an `endpoint`, not an `outbound`, in current sing-box.
         if ("wireguard".equals(outbound.optString("type"))) {
