@@ -300,7 +300,11 @@ public class Browser {
             tryTelegraph = false;
             _allowCustom = false;
         }
-        final boolean allowCustom = _allowCustom;
+        // When the VPN routes the in-app browser, keep web links inside our (proxied) WebView instead of
+        // Custom Tabs / external Chrome, which run in another process and can't be tunnelled. Explicit
+        // external opens (allowInAppBrowser=false, a specific browser, non-web schemes) still go out.
+        final boolean routeBrowser = org.telegram.messenger.vpn.VpnController.getInstance().shouldRouteBrowser();
+        final boolean allowCustom = _allowCustom && !routeBrowser;
         if (tryTelegraph) {
             try {
                 String host = AndroidUtilities.getHostAuthority(uri);
@@ -412,7 +416,7 @@ public class Browser {
 
             final boolean inappBrowser = (
                 allowInAppBrowser && BubbleActivity.instance == null &&
-                (uri != null && MessagesController.getInstance(currentAccount).isWebBrowserOpenInApp(uri.toString()) || isInstantViewOpen()) &&
+                (uri != null && MessagesController.getInstance(currentAccount).isWebBrowserOpenInApp(uri.toString()) || isInstantViewOpen() || routeBrowser) &&
                 TextUtils.isEmpty(browserPackage) &&
                 (uri.getScheme() == null || "https".equals(uri.getScheme()) || "http".equals(uri.getScheme()) || "tonsite".equals(uri.getScheme()))
                 ||

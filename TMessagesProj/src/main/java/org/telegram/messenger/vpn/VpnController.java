@@ -163,6 +163,19 @@ public class VpnController implements SingBoxManager.StateListener {
         return SingBoxManager.getInstance().getLocalPort();
     }
 
+    /**
+     * Whether in-app WebView traffic (the internal browser and every other in-process WebView) should
+     * currently go through the embedded proxy. True whenever the VPN is on and the core is actually
+     * connected with a live local port - the WebView proxy override is driven off this, and
+     * {@link org.telegram.messenger.browser.Browser} uses it to force the in-app browser over Custom
+     * Tabs so the traffic stays inside the tunnel.
+     */
+    public boolean shouldRouteBrowser() {
+        return isEnabled()
+                && SingBoxManager.getInstance().getState() == SingBoxManager.STATE_CONNECTED
+                && SingBoxManager.getInstance().getLocalPort() > 0;
+    }
+
     public int getAutoSwitchTimeoutIndex() {
         return autoSwitchTimeoutIndex;
     }
@@ -284,8 +297,11 @@ public class VpnController implements SingBoxManager.StateListener {
                 // Keep re-checking reachability on the chosen interval so a server that dies mid-session
                 // (not just at connect) triggers auto-switch.
                 scheduleHealthCheck();
+                // Route all in-process WebViews (the in-app browser included) through the proxy too.
+                WebViewProxyController.apply(SingBoxManager.getInstance().getLocalPort());
             } else {
                 AndroidUtilities.cancelRunOnUIThread(healthCheckRunnable);
+                WebViewProxyController.clear();
                 if (state == SingBoxManager.STATE_ERROR && enabled && autoSwitch && vpnList.size() > 1) {
                     AndroidUtilities.cancelRunOnUIThread(autoSwitchRunnable);
                     AndroidUtilities.runOnUIThread(autoSwitchRunnable, 1000L);
