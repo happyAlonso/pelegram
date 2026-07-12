@@ -17,6 +17,7 @@
 
 #include "TurnCustomizerImpl.h"
 #include "ReflectorRelayPortFactory.h"
+#include "Socks5UdpSocket.h"
 #include "SctpDataChannelProviderInterfaceImpl.h"
 #include "StaticThreads.h"
 #include "platform/PlatformInterface.h"
@@ -224,6 +225,43 @@ public:
 private:
     std::unique_ptr<rtc::BasicPacketSocketFactory> _impl;
     bool _standaloneReflectorMode = false;
+};
+
+// Wraps a PacketSocketFactory so every UDP socket is relayed through the local
+// SOCKS5 proxy via UDP ASSOCIATE. This is how a modern call reaches Telegram
+// reflectors through the embedded VPN: the reflectors answer UDP, so we keep the
+// media UDP and tunnel it, instead of a TCP CONNECT tunnel they ignore. TCP
+// sockets and DNS keep going straight to the wrapped implementation.
+class Socks5PacketSocketFactory : public rtc::PacketSocketFactory {
+public:
+    Socks5PacketSocketFactory(std::unique_ptr<rtc::PacketSocketFactory> impl, rtc::SocketFactory *socketFactory, rtc::SocketAddress proxyAddress) :
+    _impl(std::move(impl)),
+    _socketFactory(socketFactory),
+    _proxyAddress(proxyAddress) {
+    }
+
+    virtual ~Socks5PacketSocketFactory() {
+    }
+
+    virtual rtc::AsyncPacketSocket *CreateUdpSocket(const rtc::SocketAddress& address, uint16_t min_port, uint16_t max_port) override {
+        return rtc::Socks5UdpSocket::Create(_socketFactory, address, _proxyAddress);
+    }
+
+    virtual rtc::AsyncListenSocket *CreateServerTcpSocket(const rtc::SocketAddress &local_address, uint16_t min_port, uint16_t max_port, int opts) override {
+        return _impl->CreateServerTcpSocket(local_address, min_port, max_port, opts);
+    }
+
+    virtual rtc::AsyncPacketSocket *CreateClientTcpSocket(const rtc::SocketAddress &local_address, const rtc::SocketAddress& remote_address, const rtc::ProxyInfo& proxy_info, const std::string &user_agent, const rtc::PacketSocketTcpOptions& tcp_options) override {
+        return _impl->CreateClientTcpSocket(local_address, remote_address, proxy_info, user_agent, tcp_options);
+    }
+
+    virtual std::unique_ptr<webrtc::AsyncDnsResolverInterface> CreateAsyncDnsResolver() override {
+        return _impl->CreateAsyncDnsResolver();
+    }
+private:
+    std::unique_ptr<rtc::PacketSocketFactory> _impl;
+    rtc::SocketFactory *_socketFactory = nullptr;
+    rtc::SocketAddress _proxyAddress;
 };
 
 class WrappedNetworkManager: public rtc::NetworkManager, public sigslot::has_slots<> {
@@ -526,7 +564,12 @@ _dataChannelMessageReceived(configuration.dataChannelMessageReceived) {
         _socketFactory = std::make_unique<rtc::BasicPacketSocketFactory>(_threads->getNetworkThread()->socketserver());
         _networkManager = std::make_unique<rtc::BasicNetworkManager>(_networkMonitorFactory.get(), _threads->getNetworkThread()->socketserver());
     }
-    
+
+    // Route the call's UDP media through the embedded VPN via SOCKS5 UDP ASSOCIATE.
+    if (_proxy) {
+        _socketFactory = std::make_unique<Socks5PacketSocketFactory>(std::move(_socketFactory), _underlyingSocketFactory, rtc::SocketAddress(_proxy->host, _proxy->port));
+    }
+
     _asyncResolverFactory = std::make_unique<webrtc::BasicAsyncDnsResolverFactory>();
     
     if (getCustomParameterBool(_customParameters, "network_use_mtproto")) {
@@ -597,13 +640,18 @@ void NativeNetworkingImpl::resetDtlsSrtpTransport() {
         cricket::PORTALLOCATOR_ENABLE_IPV6 |
         cricket::PORTALLOCATOR_ENABLE_IPV6_ON_WIFI;
 
-    // A proxied call needs TCP candidates: UDP/STUN get disabled below and the HTTP CONNECT proxy can
-    // only carry TCP, so don't disable TCP when a proxy is set.
-    if (!_enableTCP && !_proxy) {
+    // A proxied call tunnels its UDP media through the SOCKS5 proxy (UDP ASSOCIATE). TCP relays would
+    // bypass that UDP tunnel, so disable TCP when proxied.
+    if (!_enableTCP || _proxy) {
         flags |= cricket::PORTALLOCATOR_DISABLE_TCP;
     }
 
-    if (_proxy || !_enableP2P) {
+    if (_proxy) {
+        // Keep UDP enabled (that's exactly what we tunnel), but gather only relay candidates -
+        // host/reflexive candidates would expose the real IP and be unreachable from the peer.
+        flags |= cricket::PORTALLOCATOR_DISABLE_STUN;
+        _portAllocator->SetCandidateFilter(cricket::CF_RELAY);
+    } else if (!_enableP2P) {
         flags |= cricket::PORTALLOCATOR_DISABLE_UDP;
         flags |= cricket::PORTALLOCATOR_DISABLE_STUN;
         uint32_t candidateFilter = _portAllocator->candidate_filter();
@@ -616,16 +664,6 @@ void NativeNetworkingImpl::resetDtlsSrtpTransport() {
     _portAllocator->set_flags(flags);
     _portAllocator->Initialize();
 
-    if (_proxy) {
-        // Send the call's relay/TCP sockets through the local HTTP CONNECT proxy (the embedded VPN).
-        // webrtc's socket layer implements HTTPS proxying; ReflectorPort honors this too (patched).
-        rtc::ProxyInfo proxyInfo;
-        proxyInfo.type = rtc::PROXY_HTTPS;
-        proxyInfo.address = rtc::SocketAddress(_proxy->host, _proxy->port);
-        proxyInfo.username = _proxy->login;
-        _portAllocator->set_proxy("tgcalls", proxyInfo);
-    }
-
     cricket::ServerAddresses stunServers;
     std::vector<cricket::RelayServerConfig> turnServers;
 
@@ -635,9 +673,7 @@ void NativeNetworkingImpl::resetDtlsSrtpTransport() {
                 rtc::SocketAddress(server.host, server.port),
                 server.login,
                 server.password,
-                // through a proxy the relay must be reached over TCP (UDP is disabled and can't be
-                // carried by an HTTP CONNECT proxy), so force TCP for every relay in that case.
-                (_proxy || server.isTcp) ? cricket::PROTO_TCP : cricket::PROTO_UDP
+                server.isTcp ? cricket::PROTO_TCP : cricket::PROTO_UDP
             ));
         } else {
             rtc::SocketAddress stunAddress = rtc::SocketAddress(server.host, server.port);

@@ -55,6 +55,7 @@ public class VpnController implements SingBoxManager.StateListener {
 
     private final ArrayList<Listener> listeners = new ArrayList<>();
     private final Runnable autoSwitchRunnable = this::switchToNext;
+    private final Runnable healthCheckRunnable = this::runHealthCheck;
 
     private VpnController() {
         SingBoxManager.getInstance().addListener(this);
@@ -130,6 +131,11 @@ public class VpnController implements SingBoxManager.StateListener {
     public void setAutoSwitch(boolean value) {
         autoSwitch = value;
         save();
+        if (value) {
+            scheduleHealthCheck();
+        } else {
+            AndroidUtilities.cancelRunOnUIThread(healthCheckRunnable);
+        }
     }
 
     public boolean isRouteCalls() {
@@ -164,6 +170,7 @@ public class VpnController implements SingBoxManager.StateListener {
     public void setAutoSwitchTimeoutIndex(int index) {
         autoSwitchTimeoutIndex = index;
         save();
+        scheduleHealthCheck();
     }
 
     public void addVpn(VpnKeyInfo info) {
@@ -274,10 +281,15 @@ public class VpnController implements SingBoxManager.StateListener {
             if (state == SingBoxManager.STATE_CONNECTED) {
                 AndroidUtilities.cancelRunOnUIThread(autoSwitchRunnable);
                 measurePing();
-            } else if (state == SingBoxManager.STATE_ERROR && enabled && autoSwitch && vpnList.size() > 1) {
-                AndroidUtilities.cancelRunOnUIThread(autoSwitchRunnable);
-                int seconds = AUTOSWITCH_TIMEOUTS[Math.max(0, Math.min(autoSwitchTimeoutIndex, AUTOSWITCH_TIMEOUTS.length - 1))];
-                AndroidUtilities.runOnUIThread(autoSwitchRunnable, seconds * 1000L);
+                // Keep re-checking reachability on the chosen interval so a server that dies mid-session
+                // (not just at connect) triggers auto-switch.
+                scheduleHealthCheck();
+            } else {
+                AndroidUtilities.cancelRunOnUIThread(healthCheckRunnable);
+                if (state == SingBoxManager.STATE_ERROR && enabled && autoSwitch && vpnList.size() > 1) {
+                    AndroidUtilities.cancelRunOnUIThread(autoSwitchRunnable);
+                    AndroidUtilities.runOnUIThread(autoSwitchRunnable, 1000L);
+                }
             }
             for (Listener l : new ArrayList<>(listeners)) {
                 l.onVpnStateChanged(state, message);
@@ -300,12 +312,10 @@ public class VpnController implements SingBoxManager.StateListener {
                 info.ping = 0;
                 // The core reports "connected" the moment it starts, even if the server is dead or
                 // blocked - startInternal only fails on a bad config, not on an unreachable server. This
-                // proxy ping is the real reachability check, so a failure here is what should drive
-                // auto-switch (STATE_ERROR alone almost never fires for a blocked server).
+                // proxy ping is the real reachability check, so a failure here is what drives auto-switch
+                // (STATE_ERROR alone almost never fires for a blocked server).
                 if (enabled && autoSwitch && info == currentVpn && vpnList.size() > 1) {
-                    AndroidUtilities.cancelRunOnUIThread(autoSwitchRunnable);
-                    int seconds = AUTOSWITCH_TIMEOUTS[Math.max(0, Math.min(autoSwitchTimeoutIndex, AUTOSWITCH_TIMEOUTS.length - 1))];
-                    AndroidUtilities.runOnUIThread(autoSwitchRunnable, seconds * 1000L);
+                    switchToNext();
                 }
             } else {
                 info.available = true;
@@ -313,6 +323,31 @@ public class VpnController implements SingBoxManager.StateListener {
             }
             notifyList();
         }));
+    }
+
+    /**
+     * Schedule the next periodic reachability check. The auto-switch timeout slider doubles as the
+     * ping-check interval: every N seconds we re-measure the current connection and, on failure, roll
+     * over to the next one. No-op unless the VPN is on, auto-switch is enabled, and there's somewhere
+     * to switch to.
+     */
+    private void scheduleHealthCheck() {
+        AndroidUtilities.cancelRunOnUIThread(healthCheckRunnable);
+        if (!enabled || !autoSwitch || vpnList.size() < 2) {
+            return;
+        }
+        int seconds = AUTOSWITCH_TIMEOUTS[Math.max(0, Math.min(autoSwitchTimeoutIndex, AUTOSWITCH_TIMEOUTS.length - 1))];
+        AndroidUtilities.runOnUIThread(healthCheckRunnable, seconds * 1000L);
+    }
+
+    private void runHealthCheck() {
+        if (!enabled || currentVpn == null
+                || SingBoxManager.getInstance().getState() != SingBoxManager.STATE_CONNECTED) {
+            return;
+        }
+        // measurePing() switches to the next connection if this one has stopped responding.
+        measurePing();
+        scheduleHealthCheck();
     }
 
     private void switchToNext() {

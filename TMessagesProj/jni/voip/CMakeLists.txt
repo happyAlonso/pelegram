@@ -519,6 +519,7 @@ add_library(tgcalls STATIC
         voip/tgcalls/v2/ReflectorPort.cpp
         voip/tgcalls/v2/NativeNetworkingImpl.cpp
         voip/tgcalls/v2/RawTcpSocket.cpp
+        voip/tgcalls/v2/Socks5UdpSocket.cpp
         voip/tgcalls/v2/InstanceV2ReferenceImpl.cpp
         voip/tgcalls/v2/ikcp.cpp
         voip/tgcalls/v2/InstanceV2Impl.cpp
