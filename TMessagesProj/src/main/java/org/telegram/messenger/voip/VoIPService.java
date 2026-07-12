@@ -3425,19 +3425,22 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 			final String persistentStateFilePath = new File(ApplicationLoader.applicationContext.getCacheDir(), "voip_persistent_state.json").getAbsolutePath();
 
 			// Route call media through the embedded VPN when the user opted in. The call keeps the modern
-			// engine; its webrtc is patched to send the relay/TCP sockets through the local HTTP CONNECT
-			// proxy (see NativeNetworkingImpl / ReflectorPort). An HTTP proxy is TCP-only, so this also
-			// forces TCP relays below.
-			final boolean routeCallsThroughVpn = VpnController.getInstance().shouldRouteCalls();
-			final String callVersion = privateCall.protocol.library_versions.get(0);
+			// engine. The modern engine's reflector protocol isn't relayed over TCP by Telegram's
+			// reflectors, so route the call through the legacy libtgvoip engine (2.4.4) instead: it has
+			// the complete, proven proxy path (SOCKS5 incl. UDP-associate) - the same way official
+			// Telegram sends calls through a proxy. Only possible when the peer also offers 2.4.4
+			// (both sides on pelegram); otherwise fall back to a normal direct call.
+			final boolean routeCallsThroughVpn = VpnController.getInstance().shouldRouteCalls()
+					&& privateCall.protocol.library_versions.contains("2.4.4");
+			final String callVersion = routeCallsThroughVpn ? "2.4.4" : privateCall.protocol.library_versions.get(0);
 			if (BuildVars.LOGS_ENABLED) {
 				FileLog.d("VoIP: routeCallsThroughVpn=" + routeCallsThroughVpn + " version=" + callVersion
 						+ " proxyPort=" + VpnController.getInstance().getProxyPort());
 			}
 
-			// endpoints - a proxied call uses TCP relays (SOCKS5 CONNECT) for a reliable path.
+			// endpoints - keep UDP relays so libtgvoip carries the call over SOCKS5 UDP-associate.
 			final boolean dbgForceTcp = preferences.getBoolean("dbg_force_tcp_in_calls", false);
-			final boolean forceTcp = dbgForceTcp || routeCallsThroughVpn;
+			final boolean forceTcp = dbgForceTcp;
 			final int endpointType = forceTcp ? Instance.ENDPOINT_TYPE_TCP_RELAY : Instance.ENDPOINT_TYPE_UDP_RELAY;
 			final Instance.Endpoint[] endpoints = new Instance.Endpoint[privateCall.connections.size()];
 			ArrayList<Long> reflectorIds = new ArrayList<>();
@@ -3465,7 +3468,7 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 			// proxy
 			Instance.Proxy proxy = null;
 			if (routeCallsThroughVpn) {
-				// point the call at the local sing-box inbound; the native side proxies it over HTTP CONNECT
+				// point the call at the local sing-box inbound; libtgvoip connects to it via SOCKS5 (no auth)
 				proxy = new Instance.Proxy("127.0.0.1", VpnController.getInstance().getProxyPort(), "", "");
 			} else if (preferences.getBoolean("proxy_enabled", false) && preferences.getBoolean("proxy_enabled_calls", false)) {
 				final String server = preferences.getString("proxy_ip", null);
