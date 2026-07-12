@@ -31,20 +31,6 @@
 
 using namespace tgcalls;
 
-// Diagnostic: mirror the call engine's webrtc/reflector logs into the native FileLog (they land in the
-// exported *_net.txt), so a VPN-routed call's ICE/reflector handshake is visible. Registered once, on
-// the first call that has a proxy, so normal calls stay quiet.
-namespace {
-class VoipFileLogSink : public rtc::LogSink {
-public:
-    void OnLogMessage(const std::string &message) override {
-        FileLog::getInstance().e("[voip] %s", message.c_str());
-    }
-};
-VoipFileLogSink g_voipFileLogSink;
-bool g_voipLogSinkRegistered = false;
-}
-
 const auto RegisterTag = Register<InstanceImpl>();
 const auto RegisterTagLegacy = Register<InstanceImplLegacy>();
 const auto RegisterTagV2_4_0_1 = Register<InstanceV2Impl>();
@@ -766,11 +752,6 @@ JNIEXPORT jlong JNICALL Java_org_telegram_messenger_voip_NativeInstance_makeNati
     jfloat aspectRatio
 ) {
     initWebRTC(env);
-
-    if (!g_voipLogSinkRegistered && !env->IsSameObject(proxyClass, nullptr)) {
-        g_voipLogSinkRegistered = true;
-        rtc::LogMessage::AddLogToStream(&g_voipFileLogSink, rtc::LS_INFO);
-    }
 
     JavaObject configObject(env, config);
     JavaObject encryptionKeyObject(env, encryptionKey);

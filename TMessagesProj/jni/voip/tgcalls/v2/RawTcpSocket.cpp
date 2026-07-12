@@ -71,7 +71,6 @@ int RawTcpSocket::Send(const void* pv,
   AppendToOutBuffer(&pkt_len, 4);
   AppendToOutBuffer(pv, cb);
 
-  RTC_LOG(LS_WARNING) << "RawTcpSocket Send: " << cb << " bytes to " << GetRemoteAddress().ToString();
   int res = FlushOutBuffer();
   if (res <= 0) {
     // drop packet if we made no progress
@@ -89,7 +88,6 @@ int RawTcpSocket::Send(const void* pv,
 }
 
 size_t RawTcpSocket::ProcessInput(rtc::ArrayView<const uint8_t> data) {
-  RTC_LOG(LS_WARNING) << "RawTcpSocket ProcessInput: got " << data.size() << " bytes from " << GetRemoteAddress().ToString();
   SocketAddress remote_addr(GetRemoteAddress());
 
   size_t processed_bytes = 0;
