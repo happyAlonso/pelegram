@@ -8,9 +8,11 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.ApplicationLoader;
+import org.telegram.messenger.BuildVars;
 import org.telegram.messenger.FileLog;
 import org.telegram.messenger.MessagesController;
 import org.telegram.messenger.UserConfig;
+import org.telegram.messenger.voip.VoIPService;
 import org.telegram.tgnet.ConnectionsManager;
 
 import java.util.ArrayList;
@@ -385,6 +387,16 @@ public class VpnController implements SingBoxManager.StateListener {
         if (vpnList.size() < 2 || currentVpn == null || !enabled) {
             return;
         }
+        if (isCallActive()) {
+            // Never roll over to another server mid-call. Auto-switch reconnects the core, which tears
+            // down the proxy the call's media is flowing through, so the call hangs in "connecting"
+            // forever. The periodic health check keeps running, so if this server is genuinely dead the
+            // switch just happens once the call has ended.
+            if (BuildVars.LOGS_ENABLED) {
+                FileLog.d("VpnController: auto-switch suppressed - call in progress");
+            }
+            return;
+        }
         int idx = vpnList.indexOf(currentVpn);
         int next = (idx + 1) % vpnList.size();
         if (next == idx) {
@@ -394,6 +406,16 @@ public class VpnController implements SingBoxManager.StateListener {
         save();
         notifyList();
         reconnect();
+    }
+
+    /**
+     * True while a voice/video call is being set up or is ongoing. Auto-switch is suppressed during
+     * this window because a server rollover reconnects the core and breaks the call's media path -
+     * see {@link #switchToNext()}. Non-null for the whole call lifetime (connecting -> established ->
+     * ending), back to null once the call ends, so the deferred switch can resume.
+     */
+    private boolean isCallActive() {
+        return VoIPService.getSharedInstance() != null;
     }
 
     public int getState() {
