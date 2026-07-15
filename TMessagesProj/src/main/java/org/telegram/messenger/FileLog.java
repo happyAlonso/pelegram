@@ -354,7 +354,12 @@ public class FileLog {
     }
 
     public static String getNetworkLogPath() {
-        if (!BuildVars.LOGS_ENABLED) {
+        // The native tgnet network log is extremely verbose (per-connection debug: every connect,
+        // disconnect, salt, ping - it hit 77 MB overnight) and is written by native code we cannot
+        // rotate from Java. It is a deep diagnostic, not something a user who just left "Enable Logs"
+        // on needs, so keep it to private-debug builds only. The app-level log (this.currentFile)
+        // stays available under LOGS_ENABLED and carries the useful lines.
+        if (!BuildVars.LOGS_ENABLED || !BuildVars.DEBUG_PRIVATE_VERSION) {
             return "";
         }
         try {

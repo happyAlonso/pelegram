@@ -62,11 +62,20 @@ final class SingBoxLogClient implements CommandClientHandler {
         }
     }
 
+    // sing-box log levels (from sing/common/logger): 0 panic, 1 fatal, 2 error, 3 warn, 4 info,
+    // 5 debug, 6 trace. Higher = noisier. The config's log.level=warn does NOT filter this
+    // CommandLog stream (the subscription gets everything), so drop info/debug/trace here - those
+    // were ~1 line per proxied connection and dominated the app log. Warn/error still come through.
+    private static final int LEVEL_INFO = 4;
+
     @Override
     public void writeLogs(LogIterator it) {
         try {
             while (it.hasNext()) {
                 LogEntry e = it.next();
+                if (e.getLevel() >= LEVEL_INFO) {
+                    continue;
+                }
                 FileLog.d("singbox-core: " + e.getMessage());
             }
         } catch (Throwable ignored) {
