@@ -41,6 +41,7 @@ import java.io.OutputStreamWriter;
 import java.lang.reflect.Field;
 import java.lang.reflect.Type;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.Locale;
 import java.util.Map;
@@ -59,6 +60,16 @@ public class FileLog {
 
     private OutputStreamWriter tlStreamWriter = null;
     private File tlRequestsFile = null;
+
+    // Auto-rotation. The process can stay alive for days (the VPN foreground service keeps it
+    // resident), so pruning only at startup is not enough: the current file is rotated in place
+    // once it outgrows MAX_LOG_FILE_SIZE, and the whole logs dir is kept under a total size and
+    // age cap. Without this, logs grew unbounded (>80 MB in a few days with logging enabled).
+    private final static long MAX_LOG_FILE_SIZE = 8 * 1024 * 1024;
+    private final static long MAX_LOGS_TOTAL_SIZE = 32 * 1024 * 1024;
+    private final static long MAX_LOGS_AGE = 3 * 24 * 60 * 60 * 1000L;
+    private final static int ROTATE_CHECK_EVERY = 500;
+    private int linesSinceRotateCheck; // only touched on logQueue
 
     private final static String tag = "tmessages";
     private final static String mtproto_tag = "MTProto";
@@ -326,6 +337,9 @@ public class FileLog {
             tlStreamWriter = new OutputStreamWriter(tlStream);
             tlStreamWriter.write("-----start log " + date + "-----\n");
             tlStreamWriter.flush();
+
+            // Drop stale/oversized logs left over from previous sessions.
+            logQueue.postRunnable(this::pruneLogsDir);
         } catch (Exception e) {
             e.printStackTrace();
         }
@@ -389,6 +403,7 @@ public class FileLog {
                         getInstance().streamWriter.write(getInstance().dateFormat.format(System.currentTimeMillis()) + " E/tmessages: \tat " + stack[a] + "\n");
                     }
                     getInstance().streamWriter.flush();
+                    getInstance().checkRotate();
                 } catch (Exception e) {
                     e.printStackTrace();
                 }
@@ -407,6 +422,7 @@ public class FileLog {
                 try {
                     getInstance().streamWriter.write(getInstance().dateFormat.format(System.currentTimeMillis()) + " E/tmessages: " + message + "\n");
                     getInstance().streamWriter.flush();
+                    getInstance().checkRotate();
                 } catch (Exception e) {
                     e.printStackTrace();
                 }
@@ -459,6 +475,7 @@ public class FileLog {
                         }
                     }
                     getInstance().streamWriter.flush();
+                    getInstance().checkRotate();
                 } catch (Exception e1) {
                     e1.printStackTrace();
                 }
@@ -565,6 +582,7 @@ public class FileLog {
                 try {
                     getInstance().streamWriter.write(getInstance().dateFormat.format(System.currentTimeMillis()) + " D/tmessages: " + message + "\n");
                     getInstance().streamWriter.flush();
+                    getInstance().checkRotate();
                 } catch (Exception e) {
                     e.printStackTrace();
                     if (AndroidUtilities.isENOSPC(e)) {
@@ -586,11 +604,100 @@ public class FileLog {
                 try {
                     getInstance().streamWriter.write(getInstance().dateFormat.format(System.currentTimeMillis()) + " W/tmessages: " + message + "\n");
                     getInstance().streamWriter.flush();
+                    getInstance().checkRotate();
                 } catch (Exception e) {
                     e.printStackTrace();
                 }
             });
         }
+    }
+
+    /**
+     * Called on logQueue after a write. Every ROTATE_CHECK_EVERY lines: if the current log file
+     * has outgrown MAX_LOG_FILE_SIZE, close it and start a fresh one, then prune the logs dir.
+     * All write runnables re-read {@code getInstance().streamWriter}, so swapping the field here
+     * (on the same queue) is safe.
+     */
+    private void checkRotate() {
+        if (++linesSinceRotateCheck < ROTATE_CHECK_EVERY) {
+            return;
+        }
+        linesSinceRotateCheck = 0;
+        try {
+            if (currentFile == null || streamWriter == null || currentFile.length() <= MAX_LOG_FILE_SIZE) {
+                return;
+            }
+            File dir = AndroidUtilities.getLogsDir();
+            if (dir == null) {
+                return;
+            }
+            String date = fileDateFormat.format(System.currentTimeMillis());
+            try {
+                streamWriter.close();
+            } catch (Exception ignored) {
+            }
+            currentFile = new File(dir, date + ".txt");
+            FileOutputStream stream = new FileOutputStream(currentFile);
+            streamWriter = new OutputStreamWriter(stream);
+            streamWriter.write("-----start log " + date + " (rotated)-----\n");
+            streamWriter.flush();
+            pruneLogsDir();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    /**
+     * Deletes log files older than MAX_LOGS_AGE and, if the directory still exceeds
+     * MAX_LOGS_TOTAL_SIZE, the oldest files first until it fits. Files belonging to the current
+     * session (still held open by Java or native writers) are never deleted.
+     */
+    private void pruneLogsDir() {
+        try {
+            File dir = AndroidUtilities.getLogsDir();
+            if (dir == null) {
+                return;
+            }
+            File[] files = dir.listFiles();
+            if (files == null) {
+                return;
+            }
+            long now = System.currentTimeMillis();
+            long total = 0;
+            ArrayList<File> candidates = new ArrayList<>();
+            for (File file : files) {
+                if (!file.isFile()) {
+                    continue;
+                }
+                if (isCurrentSessionFile(file)) {
+                    total += file.length();
+                    continue;
+                }
+                if (now - file.lastModified() > MAX_LOGS_AGE) {
+                    file.delete();
+                } else {
+                    total += file.length();
+                    candidates.add(file);
+                }
+            }
+            if (total > MAX_LOGS_TOTAL_SIZE) {
+                Collections.sort(candidates, (a, b) -> Long.compare(a.lastModified(), b.lastModified()));
+                for (int i = 0; i < candidates.size() && total > MAX_LOGS_TOTAL_SIZE; i++) {
+                    total -= candidates.get(i).length();
+                    candidates.get(i).delete();
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    private boolean isCurrentSessionFile(File file) {
+        String path = file.getAbsolutePath();
+        return currentFile != null && path.equals(currentFile.getAbsolutePath())
+                || tlRequestsFile != null && path.equals(tlRequestsFile.getAbsolutePath())
+                || networkFile != null && path.equals(networkFile.getAbsolutePath())
+                || tonlibFile != null && path.equals(tonlibFile.getAbsolutePath());
     }
 
     public static void cleanupLogs() {

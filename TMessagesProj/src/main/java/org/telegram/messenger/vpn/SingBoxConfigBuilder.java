@@ -74,7 +74,10 @@ public class SingBoxConfigBuilder {
         dns.put("strategy", "ipv4_only");
 
         JSONObject log = new JSONObject();
-        log.put("level", "info");
+        // "warn", not "info": at info the core logs every proxied connection (each HTTP request,
+        // DNS query, MTProto dial), which the log client mirrors into FileLog - that alone grew
+        // the app log by tens of MB per day and kept the disk busy 24/7 when logging was enabled.
+        log.put("level", "warn");
         log.put("timestamp", true);
 
         JSONObject root = new JSONObject();
