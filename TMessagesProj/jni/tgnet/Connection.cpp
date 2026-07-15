@@ -128,6 +128,7 @@ void Connection::onReceivedData(NativeByteBuffer *buffer) {
         if (!hasSomeDataSinceLastConnect) {
             currentDatacenter->storeCurrentAddressAndPortNum();
             isTryingNextPort = false;
+            connectedNoDataCount = 0; // endpoint answered - clear the no-data reconnect throttle
             if (connectionType == ConnectionTypeProxy) {
                 setTimeout(5);
             } else if (connectionType == ConnectionTypePush) {
@@ -657,6 +658,11 @@ inline void Connection::encryptKeyWithSecret(uint8_t *bytes, uint8_t secretType)
 void Connection::onDisconnectedInternal(int32_t reason, int32_t error) {
     reconnectTimer->stop();
     if (LOGS_ENABLED) DEBUG_D("connection(%p, account%u, dc%u, type %d) disconnected with reason %d", this, currentDatacenter->instanceNum, currentDatacenter->getDatacenterId(), connectionType, reason);
+    // Captured before wasConnected is reset below. A connection that came up (socket connected) but
+    // never received a single byte before dropping is the signature of a DC that is unreachable
+    // through the current proxy: the local SOCKS hop to 127.0.0.1 always succeeds, but the real
+    // endpoint never answers. This is used to throttle the re-dial further down.
+    bool connectedButNoData = wasConnected && !hasSomeDataSinceLastConnect;
     bool switchToNextPort = reason == 2 && wasConnected && (!hasSomeDataSinceLastConnect || currentDatacenter->isCustomPort(currentAddressFlags)) || forceNextPort;
     if (connectionType == ConnectionTypeGeneric || connectionType == ConnectionTypeTemp || connectionType == ConnectionTypeGenericMedia) {
         if (wasConnected && reason == 2 && currentTimeout < 16) {
@@ -700,7 +706,32 @@ void Connection::onDisconnectedInternal(int32_t reason, int32_t error) {
                 failedConnectionCount = 0;
             }
         }
-        if (error == 0x68 || error == 0x71) {
+        if (connectedButNoData) {
+            connectedNoDataCount++;
+        } else {
+            connectedNoDataCount = 0;
+        }
+        // Endpoint keeps accepting the socket but never answers. Without a timer guard,
+        // ConnectionsManager re-dials this connection on every request-loop pass (via
+        // getConnectionByType(..., true) -> connect()), which produced ~2 reconnects/sec all night
+        // to an unreachable media DC and drained the battery. Reuse the existing waitForReconnectTimer
+        // guard - connect() no-ops while it is set - with an exponential, capped delay so a DC that
+        // comes back still recovers within ~30s. Not applied to the proxy connection itself.
+        const uint32_t NO_DATA_THROTTLE_AFTER = 2; // allow a couple of quick retries first
+        if (connectedButNoData && connectedNoDataCount >= NO_DATA_THROTTLE_AFTER && connectionType != ConnectionTypeProxy) {
+            waitForReconnectTimer = true;
+            uint32_t shift = connectedNoDataCount - NO_DATA_THROTTLE_AFTER;
+            if (shift > 5) {
+                shift = 5;
+            }
+            uint32_t noDataTimeout = 1000u << shift; // 1s, 2s, 4s, 8s, 16s, 32s
+            if (noDataTimeout > 30000) {
+                noDataTimeout = 30000;
+            }
+            if (LOGS_ENABLED) DEBUG_D("connection(%p, account%u, dc%u, type %d) no-data reconnect throttle %u ms (count %u)", this, currentDatacenter->instanceNum, currentDatacenter->getDatacenterId(), connectionType, noDataTimeout, connectedNoDataCount);
+            reconnectTimer->setTimeout(noDataTimeout, false);
+            reconnectTimer->start();
+        } else if (error == 0x68 || error == 0x71) {
             if (connectionType != ConnectionTypeProxy) {
                 waitForReconnectTimer = true;
                 reconnectTimer->setTimeout(lastReconnectTimeout, false);
