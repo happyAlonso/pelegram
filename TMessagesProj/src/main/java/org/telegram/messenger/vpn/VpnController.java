@@ -54,6 +54,15 @@ public class VpnController implements SingBoxManager.StateListener {
     private boolean routeCalls;
     private int autoSwitchTimeoutIndex = 1; // default 10s
     private boolean loaded;
+    /**
+     * Consecutive failed health-check pings for {@link #currentVpn}. Auto-switch only fires once this
+     * reaches {@link #PING_FAILURES_BEFORE_SWITCH} - a single failure used to roll the server over, and
+     * because every switch restarts the core, the replacement's first ping then failed too (it had not
+     * handshaked yet) and switched again, so one hiccup cost several restarts. Any successful ping
+     * clears it; it also resets whenever we move to a different server or (re)connect.
+     */
+    private int consecutivePingFailures;
+    private static final int PING_FAILURES_BEFORE_SWITCH = 3;
 
     private final ArrayList<Listener> listeners = new ArrayList<>();
     private final Runnable autoSwitchRunnable = this::switchToNext;
@@ -230,6 +239,7 @@ public class VpnController implements SingBoxManager.StateListener {
 
     public void selectVpn(VpnKeyInfo info) {
         currentVpn = info;
+        consecutivePingFailures = 0; // user picked a different server - clean slate
         save();
         notifyList();
         if (enabled) {
@@ -295,6 +305,7 @@ public class VpnController implements SingBoxManager.StateListener {
         AndroidUtilities.runOnUIThread(() -> {
             if (state == SingBoxManager.STATE_CONNECTED) {
                 AndroidUtilities.cancelRunOnUIThread(autoSwitchRunnable);
+                consecutivePingFailures = 0; // fresh core session - don't carry failures across it
                 measurePing();
                 // Keep re-checking reachability on the chosen interval so a server that dies mid-session
                 // (not just at connect) triggers auto-switch.
@@ -354,17 +365,26 @@ public class VpnController implements SingBoxManager.StateListener {
                 info.available = false;
                 info.ping = 0;
                 // Only the periodic health check switches, and only if we're still connected to the same
-                // server it just tested (guards against switching during a transition).
+                // server it just tested (guards against switching during a transition). The connect-time
+                // ping is expected to fail before the handshake completes, so it must not count.
                 if (allowAutoSwitch && enabled && autoSwitch && info == currentVpn && vpnList.size() > 1
                         && SingBoxManager.getInstance().getState() == SingBoxManager.STATE_CONNECTED) {
-                    if (BuildVars.LOGS_ENABLED) {
-                        FileLog.d("VpnController: health check failed - auto-switching to next server");
+                    consecutivePingFailures++;
+                    if (consecutivePingFailures >= PING_FAILURES_BEFORE_SWITCH) {
+                        if (BuildVars.LOGS_ENABLED) {
+                            FileLog.d("VpnController: " + consecutivePingFailures
+                                    + " consecutive health checks failed - auto-switching to next server");
+                        }
+                        switchToNext();
+                    } else if (BuildVars.LOGS_ENABLED) {
+                        FileLog.d("VpnController: health check failed (" + consecutivePingFailures + "/"
+                                + PING_FAILURES_BEFORE_SWITCH + ") - staying on this server for now");
                     }
-                    switchToNext();
                 }
             } else {
                 info.available = true;
                 info.ping = time;
+                consecutivePingFailures = 0;
             }
             notifyList();
         }));
@@ -415,6 +435,7 @@ public class VpnController implements SingBoxManager.StateListener {
             return;
         }
         currentVpn = vpnList.get(next);
+        consecutivePingFailures = 0; // the new server gets a clean slate
         save();
         notifyList();
         reconnect();
