@@ -29,6 +29,7 @@ import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.ApplicationLoader;
 import org.telegram.messenger.BaseController;
 import org.telegram.messenger.BuildVars;
+import org.telegram.messenger.vpn.VpnController;
 import org.telegram.messenger.CaptchaController;
 import org.telegram.messenger.EmuDetector;
 import org.telegram.messenger.FileLoadOperation;
@@ -948,6 +949,10 @@ public class ConnectionsManager extends BaseController {
             } else {
                 native_setProxySettings(a, "", 1080, "", "", "");
             }
+            // Turning the proxy on or off changes which address families are actually reachable
+            // (see getIpStrategy), so re-evaluate and push the strategy instead of leaving tgnet on
+            // the one picked for the bare device network.
+            getInstance(a).checkConnection();
             AccountInstance accountInstance = AccountInstance.getInstance(a);
             if (accountInstance.getUserConfig().isClientActivated()) {
                 accountInstance.getMessagesController().checkPromoInfo(true);
@@ -1022,6 +1027,21 @@ public class ConnectionsManager extends BaseController {
 
     @SuppressLint("NewApi")
     protected byte getIpStrategy() {
+        // While the app-scoped VPN is on every connection is dialed through the local sing-box proxy,
+        // so what matters is what the TUNNEL can carry - not what this device's interfaces support.
+        // That tunnel is IPv4-only in practice: sing-box DNS runs ipv4_only, and Amnezia/wireguard
+        // configs routinely carry no IPv6 interface address. On a phone with mobile IPv6 the checks
+        // below would happily pick an IPv6 datacenter, and every dial to it then dies inside the
+        // tunnel ("missing IPv6 local address"). That also fails the auto-switch health check, which
+        // then rolls to the next server and restarts the core, over and over. Offer only datacenters
+        // the tunnel can actually reach.
+        try {
+            if (VpnController.getInstance().isEnabled()) {
+                return USE_IPV4_ONLY;
+            }
+        } catch (Throwable ignore) {
+            // VpnController not ready yet (very early startup) - fall through to normal detection.
+        }
         if (Build.VERSION.SDK_INT < 19) {
             return USE_IPV4_ONLY;
         }

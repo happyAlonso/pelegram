@@ -596,8 +596,38 @@ public class SingBoxConfigBuilder {
             peer.put("address", endpoint.substring(0, c));
             peer.put("port", Integer.parseInt(endpoint.substring(c + 1)));
         }
+        // The tunnel can only carry IPv6 if the interface itself has an IPv6 address. Amnezia configs
+        // routinely list an IPv4-only Address= while still advertising AllowedIPs = 0.0.0.0/0, ::/0.
+        // Passing ::/0 through then tells sing-box to route IPv6 into a tunnel with no IPv6 local
+        // address, and every IPv6 dial dies instantly with "missing IPv6 local address" - which is
+        // what Telegram's own IPv6 datacenters (2001:67c:4e8::/48) hit, thousands of times a night.
+        // Only advertise IPv6 routes when we can actually serve them.
+        boolean hasIpv6Local = false;
+        for (int i = 0; i < localAddress.length(); i++) {
+            if (localAddress.getString(i).contains(":")) {
+                hasIpv6Local = true;
+                break;
+            }
+        }
         if (!peer.has("allowed_ips")) {
-            peer.put("allowed_ips", new JSONArray().put("0.0.0.0/0").put("::/0"));
+            JSONArray allowed = new JSONArray().put("0.0.0.0/0");
+            if (hasIpv6Local) {
+                allowed.put("::/0");
+            }
+            peer.put("allowed_ips", allowed);
+        } else if (!hasIpv6Local) {
+            JSONArray configured = peer.getJSONArray("allowed_ips");
+            JSONArray filtered = new JSONArray();
+            for (int i = 0; i < configured.length(); i++) {
+                String a = configured.getString(i);
+                if (!a.contains(":")) {
+                    filtered.put(a);
+                }
+            }
+            if (filtered.length() == 0) {
+                filtered.put("0.0.0.0/0");
+            }
+            peer.put("allowed_ips", filtered);
         }
         // AmneziaWG uses MTU 1280 by default. The awg-quick text (e.g. from an Amnezia "for other
         // apps" QR) usually omits it; without it sing-box uses a larger MTU and traffic stalls
