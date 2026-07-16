@@ -341,6 +341,15 @@ public class VpnController implements SingBoxManager.StateListener {
         int account = UserConfig.selectedAccount;
         ConnectionsManager.getInstance(account).checkProxy("127.0.0.1", port, "", "", "", time -> AndroidUtilities.runOnUIThread(() -> {
             info.checking = false;
+            if (BuildVars.LOGS_ENABLED) {
+                // Why the health check decided what it did. Without this the only symptom is the core
+                // silently restarting every N seconds, which is impossible to attribute from a log.
+                FileLog.d("VpnController: ping " + info.getType() + " '" + info.name + "' -> "
+                        + (time == -1 ? "FAILED" : time + "ms")
+                        + " (healthCheck=" + allowAutoSwitch + ", autoSwitch=" + autoSwitch
+                        + ", state=" + SingBoxManager.getInstance().getState()
+                        + ", servers=" + vpnList.size() + ")");
+            }
             if (time == -1) {
                 info.available = false;
                 info.ping = 0;
@@ -348,6 +357,9 @@ public class VpnController implements SingBoxManager.StateListener {
                 // server it just tested (guards against switching during a transition).
                 if (allowAutoSwitch && enabled && autoSwitch && info == currentVpn && vpnList.size() > 1
                         && SingBoxManager.getInstance().getState() == SingBoxManager.STATE_CONNECTED) {
+                    if (BuildVars.LOGS_ENABLED) {
+                        FileLog.d("VpnController: health check failed - auto-switching to next server");
+                    }
                     switchToNext();
                 }
             } else {

@@ -635,6 +635,14 @@ public class SingBoxConfigBuilder {
         if (!o.has("mtu")) {
             o.put("mtu", 1280);
         }
+        // Same story as MTU: the awg-quick text routinely omits PersistentKeepalive, and without it
+        // wireguard sends nothing while idle, so the NAT mapping in front of the phone expires after
+        // ~30-120s. The peer can then no longer reach us, the tunnel goes dead, the health-check ping
+        // fails and auto-switch restarts the core - seen as "connects for a while, then reconnects".
+        // 25s is the standard wireguard NAT-keepalive interval.
+        if (!peer.has("persistent_keepalive_interval")) {
+            peer.put("persistent_keepalive_interval", 25);
+        }
         o.put("address", localAddress);
         o.put("peers", new JSONArray().put(peer));
         return o;

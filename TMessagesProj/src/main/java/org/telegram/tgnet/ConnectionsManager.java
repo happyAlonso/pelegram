@@ -949,12 +949,13 @@ public class ConnectionsManager extends BaseController {
             } else {
                 native_setProxySettings(a, "", 1080, "", "", "");
             }
-            // Turning the proxy on or off changes which address families are actually reachable
-            // (see getIpStrategy), so re-evaluate and push the strategy instead of leaving tgnet on
-            // the one picked for the bare device network.
-            getInstance(a).checkConnection();
             AccountInstance accountInstance = AccountInstance.getInstance(a);
             if (accountInstance.getUserConfig().isClientActivated()) {
+                // Turning the proxy on or off changes which address families are reachable (see
+                // getIpStrategy), so re-push the strategy. Deliberately not checkConnection(): that
+                // would also re-report network availability, and it must stay inside the activated
+                // guard - getInstance(a) constructs a full tgnet instance for unused account slots.
+                native_setIpStrategy(a, getInstance(a).getIpStrategy());
                 accountInstance.getMessagesController().checkPromoInfo(true);
             }
         }
