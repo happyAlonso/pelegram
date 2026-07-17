@@ -30,6 +30,9 @@ need a separate VPN client just to use Telegram.
   app points Telegram's existing proxy layer at it.
 - **Connection status, like proxies.** A VPN key shows whether it is working and its latency, the
   same way the proxy list does.
+- **Calls and the in-app browser go through the tunnel too.** 1:1 calls (both directions, including
+  with stock Telegram users) and the in-app browser / web views route through the VPN, with DNS
+  resolved on the far side of the tunnel.
 - Powered by an embedded [sing-box](https://sing-box.sagernet.org/) core.
 
 ## How to use
@@ -62,10 +65,20 @@ the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg
 
 ## Status
 
-- Embedded sing-box core, config parsing, and the connect/disconnect wiring are integrated.
+- Based on official Telegram **12.9.0** (TL layer 228), kept current with periodic rebases onto upstream.
+- Embedded sing-box core, key parsing, the key management UI, and connect/disconnect wiring are
+  integrated and shipping.
+- Calls, the in-app browser, auto-switch between keys, reconnect throttling, background push, and
+  boot autostart are in place.
 - Current builds target **arm64-v8a** only.
-- The in-app UI for pasting and managing keys is being finished; the transport and status plumbing
-  are in place.
+
+## Todo / known issues
+
+- **Out of memory on a media-heavy channel over a slow VPN link.** Opening a channel with a lot of
+  photos/videos while the tunnel is running slowly can exhaust the app's heap and restart it:
+  downloads stall and pile up faster than they complete and free their buffers. Being worked on -
+  planned steps: a heap dump on OOM to pin the exact consumer, lower download concurrency while the
+  VPN is active, and handling Android's low-memory signals (`onTrimMemory`) to shed caches under pressure.
 
 ## Building from source
 
