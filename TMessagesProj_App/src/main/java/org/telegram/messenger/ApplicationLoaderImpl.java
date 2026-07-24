@@ -24,7 +24,7 @@ import java.nio.charset.StandardCharsets;
 public class ApplicationLoaderImpl extends ApplicationLoader {
 
     // Fork version = the release tag without the leading "v". Bump on every release.
-    private static final String CURRENT_VERSION = "1.2.1";
+    private static final String CURRENT_VERSION = "1.2.2";
     // /releases/latest returns only the newest full release (GitHub excludes prereleases and
     // drafts), so the in-app updater never offers a test prerelease - only promoted prod builds.
     private static final String RELEASES_API = "https://api.github.com/repos/happyAlonso/pelegram/releases/latest";
@@ -152,6 +152,9 @@ public class ApplicationLoaderImpl extends ApplicationLoader {
         AlertDialog progressDialog = new AlertDialog(activity, AlertDialog.ALERT_TYPE_LOADING);
         progressDialog.setMessage(LocaleController.getString(R.string.VpnUpdateDownloading));
         progressDialog.setCanCancel(true);
+        // Don't let a stray tap on the dimmed area outside the dialog cancel the download (that fired
+        // onCancel -> downloading=false and threw away the partial APK). Back button still cancels.
+        progressDialog.setCanceledOnTouchOutside(false);
         progressDialog.setOnCancelListener(d -> downloading = false);
         progressDialog.show();
         downloading = true;
