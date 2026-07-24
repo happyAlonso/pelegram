@@ -767,7 +767,10 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
 
         proxyButtonView = new ImageView(context);
         proxyButtonView.setImageDrawable(proxyDrawable = new ProxyDrawable(context));
-        proxyButtonView.setOnClickListener(v -> presentFragment(new ProxyListActivity()));
+        // pelegram: this is a VPN client - the login-screen button opens the fork's VPN-key manager
+        // (not the stock SOCKS5/MTProto proxy list), so a new user on a blocked network can paste and
+        // enable a vless/hysteria2/AmneziaWG key that tunnels the very first sendCode.
+        proxyButtonView.setOnClickListener(v -> presentFragment(new VpnListActivity()));
         proxyButtonView.setAlpha(0f);
         proxyButtonView.setVisibility(View.GONE);
         sizeNotifierFrameLayout.addView(proxyButtonView, LayoutHelper.createFrame(32, 32, Gravity.RIGHT | Gravity.TOP, 16, 16, 16, 16));
@@ -8777,16 +8780,12 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
         String proxyAddress = preferences.getString("proxy_ip", "");
         final boolean proxyEnabled = preferences.getBoolean("proxy_enabled", false) && !TextUtils.isEmpty(proxyAddress);
         final boolean connected = currentConnectionState == ConnectionsManager.ConnectionStateConnected || currentConnectionState == ConnectionsManager.ConnectionStateUpdating;
-        final boolean connecting = currentConnectionState == ConnectionsManager.ConnectionStateConnecting || currentConnectionState == ConnectionsManager.ConnectionStateWaitingForNetwork || currentConnectionState == ConnectionsManager.ConnectionStateConnectingToProxy;
-        if (proxyEnabled) {
-            proxyDrawable.setConnected(true, connected, animated);
-            showProxyButton(true, animated);
-        } else if (getMessagesController().blockedCountry && !SharedConfig.proxyList.isEmpty() || connecting) {
-            proxyDrawable.setConnected(true, connected, animated);
-            showProxyButtonDelayed();
-        } else {
-            showProxyButton(false, animated);
-        }
+        // pelegram: always keep the VPN-key button visible on the login screen. Stock only showed it
+        // when a proxy was already set or the connection was stuck "connecting"; on a blocked network
+        // a fast-failing sendCode could settle before that ever triggered, leaving a new user with no
+        // way to reach the key manager and no way to log in. As a VPN client the entry must be present.
+        proxyDrawable.setConnected(proxyEnabled, connected, animated);
+        showProxyButton(true, animated);
     }
     
     private boolean proxyButtonVisible;
