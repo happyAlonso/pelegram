@@ -23,6 +23,11 @@ public class FileLoaderPriorityQueue {
 
     boolean checkOperationsScheduled = false;
 
+    // pelegram: every queue registers itself so MemoryGuard can report what was in flight when the
+    // heap ran out. There are only a couple of dozen of these (per account, per dc, per size).
+    private static final ArrayList<FileLoaderPriorityQueue> allQueues = new ArrayList<>();
+    private volatile int lastActiveCount;
+
     Runnable checkOperationsRunnable = () -> {
         checkLoadingOperationInternal();
         checkOperationsScheduled = false;
@@ -33,6 +38,28 @@ public class FileLoaderPriorityQueue {
         this.name = name;
         this.type = type;
         this.workerQueue = workerQueue;
+        synchronized (allQueues) {
+            allQueues.add(this);
+        }
+    }
+
+    /** pelegram: one-line summary of the non-empty queues, for the OOM report. */
+    public static String dumpAllQueues() {
+        StringBuilder sb = new StringBuilder();
+        synchronized (allQueues) {
+            for (int i = 0; i < allQueues.size(); i++) {
+                FileLoaderPriorityQueue queue = allQueues.get(i);
+                int count = queue.getCount();
+                if (count > 0) {
+                    if (sb.length() > 0) {
+                        sb.append(", ");
+                    }
+                    sb.append("acc").append(queue.currentAccount).append(' ').append(queue.name)
+                            .append(": ").append(queue.lastActiveCount).append('/').append(count);
+                }
+            }
+        }
+        return sb.length() > 0 ? sb.toString() : "empty";
     }
 
     public void add(FileLoadOperation operation) {
@@ -91,6 +118,9 @@ public class FileLoaderPriorityQueue {
         int lastPriority = 0;
         boolean pauseAllNextOperations = false;
         int max = type == TYPE_LARGE ? MessagesController.getInstance(currentAccount).largeQueueMaxActiveOperations : MessagesController.getInstance(currentAccount).smallQueueMaxActiveOperations;
+        // pelegram: fewer parallel operations while everything shares one tunnel, or while the heap
+        // is tight - the in-flight chunk buffers are what pile up when the link cannot drain them.
+        max = MemoryGuard.limitConcurrentDownloads(max, type == TYPE_LARGE);
         tmpListOperations.clear();
         for (int i = 0; i < allOperations.size(); i++) {
             FileLoadOperation prevOperation = i > 0 ? allOperations.get(i - 1) : null;
@@ -126,6 +156,7 @@ public class FileLoaderPriorityQueue {
             }
             lastPriority = operation.getPriority();
         }
+        lastActiveCount = activeCount;
         for (int i = 0; i < tmpListOperations.size(); i++) {
             tmpListOperations.get(i).start();
         }

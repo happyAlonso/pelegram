@@ -75,10 +75,14 @@ the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg
 ## Todo / known issues
 
 - **Out of memory on a media-heavy channel over a slow VPN link.** Opening a channel with a lot of
-  photos/videos while the tunnel is running slowly can exhaust the app's heap and restart it:
-  downloads stall and pile up faster than they complete and free their buffers. Being worked on -
-  planned steps: a heap dump on OOM to pin the exact consumer, lower download concurrency while the
-  VPN is active, and handling Android's low-memory signals (`onTrimMemory`) to shed caches under pressure.
+  photos/videos while the tunnel is running slowly could exhaust the app's heap and restart it:
+  downloads stall and pile up faster than they complete and free their buffers. Mitigated in 1.2.3 by
+  `MemoryGuard`, which caps how many file-load operations run in parallel while the tunnel carries the
+  traffic (and drops to one under pressure), sheds the image caches on Android's `onTrimMemory` /
+  `onLowMemory` signals, and writes an OOM report - heap and native usage, tunnel state, the download
+  queue depth and the stack - into the logs directory so it ships with **Send Logs**. With logging
+  enabled it also writes an `.hprof` heap dump to `files/oom/`. Still watching for a report that
+  names the exact consumer; the caps are a mitigation, not a confirmed root-cause fix.
 
 ## Building from source
 

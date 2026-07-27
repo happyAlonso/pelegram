@@ -23,8 +23,9 @@ import java.nio.charset.StandardCharsets;
 
 public class ApplicationLoaderImpl extends ApplicationLoader {
 
-    // Fork version = the release tag without the leading "v". Bump on every release.
-    private static final String CURRENT_VERSION = "1.2.2";
+    // Fork version = the release tag without the leading "v". Single source of truth is
+    // APP_VERSION_NAME in gradle.properties -> manifest versionName -> here. Bump it there only.
+    private static final String CURRENT_VERSION = BuildConfig.VERSION_NAME;
     // /releases/latest returns only the newest full release (GitHub excludes prereleases and
     // drafts), so the in-app updater never offers a test prerelease - only promoted prod builds.
     private static final String RELEASES_API = "https://api.github.com/repos/happyAlonso/pelegram/releases/latest";

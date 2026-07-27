@@ -345,6 +345,20 @@ public class ApplicationLoader extends Application {
 
         LauncherIconController.tryFixLauncherIconIfNeeded();
         ProxyRotationController.init();
+        // pelegram: react to memory pressure and report out-of-memory crashes (see MemoryGuard).
+        MemoryGuard.install();
+    }
+
+    @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        MemoryGuard.onTrimMemory(level);
+    }
+
+    @Override
+    public void onLowMemory() {
+        super.onLowMemory();
+        MemoryGuard.onLowMemory();
     }
 
     public static void startPushService() {
