@@ -2,6 +2,7 @@ package org.telegram.messenger.vpn;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.os.SystemClock;
 import android.text.TextUtils;
 
 import org.json.JSONArray;
@@ -26,8 +27,25 @@ public class VpnController implements SingBoxManager.StateListener {
 
     private static final String PREFS = "vpnconfig";
 
-    /** Auto-switch delay options (seconds), mirrors the proxy rotation timeouts. */
-    public static final int[] AUTOSWITCH_TIMEOUTS = {5, 10, 15, 30, 60};
+    /**
+     * Auto-switch delay options (seconds), i.e. how often the current connection is re-pinged.
+     *
+     * These used to start at 5s. Every check tears the proxy connection down and re-dials it, which
+     * makes sing-box open a fresh outbound to the VPN server (a full TLS/QUIC handshake), so a short
+     * interval was expensive in two ways: the cellular radio never got to leave its high-power state
+     * (RRC inactivity timers run 10-20s, so anything under that pins the radio up permanently), and
+     * every re-dial reset tgnet's background sleep timer - see {@link #runHealthCheck()}. The floor is
+     * now 30s and the default 2 minutes.
+     */
+    public static final int[] AUTOSWITCH_TIMEOUTS = {30, 60, 120, 300};
+    private static final int DEFAULT_AUTOSWITCH_TIMEOUT_INDEX = 2; // 2 minutes
+
+    /**
+     * Minimum spacing between health checks while the UI is not in front. The user-chosen interval
+     * only applies while they are actually looking at the app; in the background a dead server just
+     * needs to be noticed eventually (so notifications keep arriving), not within seconds.
+     */
+    private static final long BACKGROUND_MIN_INTERVAL_MS = 5 * 60 * 1000L;
 
     public interface Listener {
         void onVpnListChanged();
@@ -52,7 +70,9 @@ public class VpnController implements SingBoxManager.StateListener {
     private boolean enabled;
     private boolean autoSwitch;
     private boolean routeCalls;
-    private int autoSwitchTimeoutIndex = 1; // default 10s
+    private int autoSwitchTimeoutIndex = DEFAULT_AUTOSWITCH_TIMEOUT_INDEX;
+    /** elapsedRealtime of the last ping actually sent, so the background floor survives deep sleep. */
+    private long lastHealthCheckElapsed;
     private boolean loaded;
     /**
      * Consecutive failed health-check pings for {@link #currentVpn}. Auto-switch only fires once this
@@ -86,7 +106,10 @@ public class VpnController implements SingBoxManager.StateListener {
         enabled = p.getBoolean("enabled", false);
         autoSwitch = p.getBoolean("autoswitch", false);
         routeCalls = p.getBoolean("route_calls", false);
-        autoSwitchTimeoutIndex = p.getInt("autoswitch_timeout", 1);
+        // New pref key: the old indices addressed a 5s..60s ladder that no longer exists, and every
+        // value on it was hard on the battery, so an old setting is dropped rather than remapped onto
+        // whatever index happens to line up.
+        autoSwitchTimeoutIndex = p.getInt("autoswitch_timeout_v2", DEFAULT_AUTOSWITCH_TIMEOUT_INDEX);
         try {
             JSONArray arr = new JSONArray(p.getString("list", "[]"));
             for (int i = 0; i < arr.length(); i++) {
@@ -126,7 +149,7 @@ public class VpnController implements SingBoxManager.StateListener {
                 .putBoolean("enabled", enabled)
                 .putBoolean("autoswitch", autoSwitch)
                 .putBoolean("route_calls", routeCalls)
-                .putInt("autoswitch_timeout", autoSwitchTimeoutIndex)
+                .putInt("autoswitch_timeout_v2", autoSwitchTimeoutIndex)
                 .putInt("current", currentVpn == null ? -1 : vpnList.indexOf(currentVpn))
                 .apply();
     }
@@ -349,6 +372,7 @@ public class VpnController implements SingBoxManager.StateListener {
             return;
         }
         info.checking = true;
+        lastHealthCheckElapsed = SystemClock.elapsedRealtime();
         int account = UserConfig.selectedAccount;
         ConnectionsManager.getInstance(account).checkProxy("127.0.0.1", port, "", "", "", time -> AndroidUtilities.runOnUIThread(() -> {
             info.checking = false;
@@ -359,7 +383,7 @@ public class VpnController implements SingBoxManager.StateListener {
                         + (time == -1 ? "FAILED" : time + "ms")
                         + " (healthCheck=" + allowAutoSwitch + ", autoSwitch=" + autoSwitch
                         + ", state=" + SingBoxManager.getInstance().getState()
-                        + ", servers=" + vpnList.size() + ")");
+                        + ", servers=" + vpnList.size() + ", fg=" + isInForeground() + ")");
             }
             if (time == -1) {
                 info.available = false;
@@ -394,7 +418,8 @@ public class VpnController implements SingBoxManager.StateListener {
      * Schedule the next periodic reachability check. The auto-switch timeout slider doubles as the
      * ping-check interval: every N seconds we re-measure the current connection and, on failure, roll
      * over to the next one. No-op unless the VPN is on, auto-switch is enabled, and there's somewhere
-     * to switch to.
+     * to switch to. Whether a given tick actually pings is decided in {@link #runHealthCheck()} - in
+     * the background most ticks are skipped.
      */
     private void scheduleHealthCheck() {
         AndroidUtilities.cancelRunOnUIThread(healthCheckRunnable);
@@ -405,13 +430,48 @@ public class VpnController implements SingBoxManager.StateListener {
         AndroidUtilities.runOnUIThread(healthCheckRunnable, seconds * 1000L);
     }
 
+    /**
+     * The user is looking at the app. Only then is the fast, user-chosen interval worth its cost.
+     * Screen off, or the UI in the background, both count as not-in-front.
+     */
+    private static boolean isInForeground() {
+        return ApplicationLoader.isScreenOn && !ApplicationLoader.mainInterfacePaused;
+    }
+
+    /**
+     * The timer keeps ticking at the user's interval, but in the background we let most ticks pass
+     * without pinging. That matters more than it looks: a ping is not a UDP echo, it is
+     * {@code ConnectionsManager.checkProxy}, which suspends the proxy connection and re-dials it, so
+     * sing-box opens a brand new outbound to the VPN server every time. Two consequences:
+     *
+     *   1. Radio. Cellular RRC inactivity timers run 10-20s. Dialling more often than that never lets
+     *      the radio demote out of its high-power state, which is most of the reported drain.
+     *   2. tgnet never sleeps. When the app is backgrounded tgnet suspends every datacenter connection
+     *      and parks its event loop for ~3 minutes between push pings. But a proxy connection coming
+     *      up resets that sleep timer (ConnectionsManager.cpp, onConnectionConnected -> lastPauseTime),
+     *      and the next pass through select() then takes the "resume network and timers" branch: the
+     *      poll timeout drops back to 1s, the generic ping restarts on its 19s cycle, and the request
+     *      queue is walked every second. The sleep timer is 10s (CONNECTION_BACKGROUND_KEEP_TIME), so
+     *      the old 10s default meant it could essentially never stay asleep.
+     *
+     * Leaving the timer running (rather than cancelling it while backgrounded) means no foreground
+     * hook is needed anywhere: the first tick after the user comes back sees the app in front and goes
+     * straight back to the fast cadence. The tick itself is a main-looper post - no wakelock, no alarm,
+     * and it does not fire at all while the device is in deep sleep.
+     */
     private void runHealthCheck() {
         if (!enabled || currentVpn == null
                 || SingBoxManager.getInstance().getState() != SingBoxManager.STATE_CONNECTED) {
             return;
         }
-        // measurePing(true) switches to the next connection if this one has stopped responding.
-        measurePing(true);
+        // elapsedRealtime, not uptimeMillis: time spent in deep sleep must count towards the floor,
+        // otherwise a phone that was asleep for an hour pings the moment it wakes.
+        boolean due = isInForeground()
+                || SystemClock.elapsedRealtime() - lastHealthCheckElapsed >= BACKGROUND_MIN_INTERVAL_MS;
+        if (due) {
+            // measurePing(true) switches to the next connection if this one has stopped responding.
+            measurePing(true);
+        }
         scheduleHealthCheck();
     }
 

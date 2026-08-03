@@ -7,7 +7,8 @@
     <string name="VpnSettings">VPN Settings</string>
     <string name="UseVpn">Use VPN</string>
     <string name="VpnAutoSwitch">Auto-switch VPN</string>
-    <string name="VpnAutoSwitchInfo">Choose how quickly the app should switch to another connection when the current one stops responding.</string>
+    <string name="VpnAutoSwitchInfo">Choose how quickly the app should switch to another connection when the current one stops responding. Checks run at this rate while you have the app open; in the background they are spaced out to save battery.</string>
+    <string name="VpnAutoSwitchTimeoutMinutes">%1$d min.</string>
     <string name="VpnRouteCalls">Route calls through VPN</string>
     <string name="VpnRouteCallsInfo">Send voice and video calls through the VPN too. This hides your IP address from the other person, but calls use a relay over TCP instead of a direct connection - so quality may drop and latency may rise. Off by default.</string>
     <string name="VpnDetails">Edit connection</string>

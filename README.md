@@ -74,6 +74,22 @@ the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg
 
 ## Todo / known issues
 
+- **Battery drain compared to the official client.** Two causes, one fixed in 1.2.4. (a) *Fixed:* with
+  auto-switch on, the health check re-pinged the current connection every 10s by default, screen off
+  or not. Each check is a `ConnectionsManager.checkProxy`, which suspends and re-dials the proxy
+  connection, so sing-box opened a fresh outbound to the VPN server every time. That pinned the
+  cellular radio in its high-power state (RRC inactivity timers run 10-20s) and, worse, reset tgnet's
+  background sleep timer - a proxy connection coming up sets `lastPauseTime` in
+  `onConnectionConnected`, so the next `select()` pass takes the "resume network and timers" branch
+  and the poll interval drops from ~3min back to 1s. With the sleep timer itself at 10s
+  (`CONNECTION_BACKGROUND_KEEP_TIME`) the app could never stay asleep. Now the user's interval applies
+  only in the foreground, the background floor is 5 minutes, and the ladder is 30s/1m/2m/5m defaulting
+  to 2m. Cost: a server that dies while the app is closed takes up to ~15min to be switched away from
+  (5min floor x 3 failures); worth revisiting by kicking a check off tgnet's own connection-state
+  change instead of waiting for the timer. (b) *Structural, not fixable:* the fork can't use FCM, so
+  it force-enables tgnet's push connection and runs a foreground service whenever the VPN is on. The
+  official client shares one FCM socket across the whole device and lets the process be frozen. This
+  also silently overwrites the user's own "Background Connection" toggle every time the VPN is toggled.
 - **Out of memory on a media-heavy channel over a slow VPN link.** Opening a channel with a lot of
   photos/videos while the tunnel is running slowly could exhaust the app's heap and restart it:
   downloads stall and pile up faster than they complete and free their buffers. Mitigated in 1.2.3 by

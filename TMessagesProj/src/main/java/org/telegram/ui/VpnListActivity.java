@@ -671,7 +671,10 @@ public class VpnListActivity extends BaseFragment implements VpnController.Liste
                     SlideChooseView chooseView = (SlideChooseView) holder.itemView;
                     String[] values = new String[VpnController.AUTOSWITCH_TIMEOUTS.length];
                     for (int i = 0; i < values.length; i++) {
-                        values[i] = LocaleController.formatString(R.string.ProxyRotationTimeoutSeconds, VpnController.AUTOSWITCH_TIMEOUTS[i]);
+                        int seconds = VpnController.AUTOSWITCH_TIMEOUTS[i];
+                        values[i] = seconds < 60
+                                ? LocaleController.formatString(R.string.ProxyRotationTimeoutSeconds, seconds)
+                                : LocaleController.formatString(R.string.VpnAutoSwitchTimeoutMinutes, seconds / 60);
                     }
                     chooseView.setCallback(i -> VpnController.getInstance().setAutoSwitchTimeoutIndex(i));
                     chooseView.setOptions(c.getAutoSwitchTimeoutIndex(), values);
