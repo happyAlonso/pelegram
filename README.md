@@ -84,12 +84,20 @@ the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg
   and the poll interval drops from ~3min back to 1s. With the sleep timer itself at 10s
   (`CONNECTION_BACKGROUND_KEEP_TIME`) the app could never stay asleep. Now the user's interval applies
   only in the foreground, the background floor is 5 minutes, and the ladder is 30s/1m/2m/5m defaulting
-  to 2m. Cost: a server that dies while the app is closed takes up to ~15min to be switched away from
-  (5min floor x 3 failures); worth revisiting by kicking a check off tgnet's own connection-state
-  change instead of waiting for the timer. (b) *Structural, not fixable:* the fork can't use FCM, so
-  it force-enables tgnet's push connection and runs a foreground service whenever the VPN is on. The
-  official client shares one FCM socket across the whole device and lets the process be frozen. This
-  also silently overwrites the user's own "Background Connection" toggle every time the VPN is toggled.
+  to 2m. (b) *Structural, not fixable:* the fork can't use FCM, so it force-enables tgnet's push
+  connection and runs a foreground service whenever the VPN is on. The official client shares one FCM
+  socket across the whole device and lets the process be frozen.
+- **Auto-switch is slow to notice a dead server while the app is closed.** Fallout of the 1.2.4
+  battery fix: with the 5 minute background floor and `PING_FAILURES_BEFORE_SWITCH` = 3, a server that
+  dies with the UI closed takes up to ~15 minutes to be switched away from, against under a minute
+  before. Fix by kicking a check off tgnet's own connection-state change rather than waiting for the
+  next timer tick. Do *not* just lower the failure gate - it exists because every switch restarts the
+  core, so a lower gate brings back the switch cascades it was added to stop.
+- **The VPN overwrites the user's "Background Connection" setting.** `updateBackgroundKeepAlive()`
+  writes `pushConnection` on every VPN enable/disable/select, so a user who deliberately turns
+  Background Connection off in Notifications settings gets it silently turned back on. The fork does
+  need that connection while the VPN is on (no FCM), but it should not clobber an explicit user
+  choice, and it never restores the previous value when the VPN goes off.
 - **Out of memory on a media-heavy channel over a slow VPN link.** Opening a channel with a lot of
   photos/videos while the tunnel is running slowly could exhaust the app's heap and restart it:
   downloads stall and pile up faster than they complete and free their buffers. Mitigated in 1.2.3 by
