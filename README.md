@@ -72,6 +72,21 @@ the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg
   boot autostart are in place.
 - Current builds target **arm64-v8a** only.
 
+## Notes on design
+
+- **Background auto-switch is driven by tgnet's traffic, not by a timer** (1.2.5). 1.2.4 floored
+  background health checks at 5 minutes to stop them pinning the radio, which meant a server dying with
+  the app closed took 15-40 minutes to be switched away from - a real user log showed 40 minutes with no
+  working tunnel overnight. The fix is to stop asking on a schedule: `ConnectionsManager.onBytesReceived`
+  sets a flag on `VpnController`, and the background tick (60s) just reads it. Bytes arriving means they
+  came through the tunnel, so the server is alive - proven for free, and more truthfully than a ping,
+  which can time out on a server that is carrying real traffic. Only a tunnel that is completely silent
+  for 2 consecutive ticks *while the device is awake* gets a real ping, then up to three, then a switch:
+  ~2-4 minutes. A healthy backgrounded client now spends zero pings. Deep sleep needs no handling because
+  the ticks are main-looper posts and stop with the device. Note tgnet's *connection state* is not usable
+  for this - `ConnectionStateConnectingToProxy` is also its normal backgrounded resting state (390 flips
+  in 40h on a perfectly healthy tunnel), so it cannot tell asleep from broken.
+
 ## Todo / known issues
 
 - **Battery drain compared to the official client.** Two causes, one fixed in 1.2.4. (a) *Fixed:* with
@@ -83,16 +98,11 @@ the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg
   `onConnectionConnected`, so the next `select()` pass takes the "resume network and timers" branch
   and the poll interval drops from ~3min back to 1s. With the sleep timer itself at 10s
   (`CONNECTION_BACKGROUND_KEEP_TIME`) the app could never stay asleep. Now the user's interval applies
-  only in the foreground, the background floor is 5 minutes, and the ladder is 30s/1m/2m/5m defaulting
-  to 2m. (b) *Structural, not fixable:* the fork can't use FCM, so it force-enables tgnet's push
+  only in the foreground, the ladder is 30s/1m/2m/5m defaulting to 2m, and backgrounded the app does
+  not ping on a timer at all - see the auto-switch note below. (b) *Structural, not fixable:* the fork
+  can't use FCM, so it force-enables tgnet's push
   connection and runs a foreground service whenever the VPN is on. The official client shares one FCM
   socket across the whole device and lets the process be frozen.
-- **Auto-switch is slow to notice a dead server while the app is closed.** Fallout of the 1.2.4
-  battery fix: with the 5 minute background floor and `PING_FAILURES_BEFORE_SWITCH` = 3, a server that
-  dies with the UI closed takes up to ~15 minutes to be switched away from, against under a minute
-  before. Fix by kicking a check off tgnet's own connection-state change rather than waiting for the
-  next timer tick. Do *not* just lower the failure gate - it exists because every switch restarts the
-  core, so a lower gate brings back the switch cascades it was added to stop.
 - **The VPN overwrites the user's "Background Connection" setting.** `updateBackgroundKeepAlive()`
   writes `pushConnection` on every VPN enable/disable/select, so a user who deliberately turns
   Background Connection off in Notifications settings gets it silently turned back on. The fork does

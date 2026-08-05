@@ -28,7 +28,9 @@ public class VpnController implements SingBoxManager.StateListener {
     private static final String PREFS = "vpnconfig";
 
     /**
-     * Auto-switch delay options (seconds), i.e. how often the current connection is re-pinged.
+     * Auto-switch delay options (seconds): how often the current connection is re-pinged *while the
+     * user has the app open*. Backgrounded, the interval does not apply at all - see
+     * {@link #runHealthCheck()}.
      *
      * These used to start at 5s. Every check tears the proxy connection down and re-dials it, which
      * makes sing-box open a fresh outbound to the VPN server (a full TLS/QUIC handshake), so a short
@@ -41,11 +43,31 @@ public class VpnController implements SingBoxManager.StateListener {
     private static final int DEFAULT_AUTOSWITCH_TIMEOUT_INDEX = 2; // 2 minutes
 
     /**
-     * Minimum spacing between health checks while the UI is not in front. The user-chosen interval
-     * only applies while they are actually looking at the app; in the background a dead server just
-     * needs to be noticed eventually (so notifications keep arriving), not within seconds.
+     * How often the background tick runs, regardless of the user's (foreground) interval. The tick
+     * itself is nearly free - normally it just observes that tgnet has received data through the
+     * tunnel and returns without pinging, see {@link #runHealthCheck()} - so it can afford to be
+     * frequent. It is a plain main-looper post: no wakelock, no alarm, and it does not fire at all
+     * while the device is in deep sleep.
      */
-    private static final long BACKGROUND_MIN_INTERVAL_MS = 5 * 60 * 1000L;
+    private static final long BACKGROUND_TICK_MS = 60 * 1000L;
+
+    /**
+     * How many consecutive background ticks must pass with no inbound tgnet traffic at all before we
+     * spend a real ping on finding out why. Two ticks means ~2 minutes of the device being *awake*
+     * with a completely silent tunnel; a healthy backgrounded client is never that quiet for that
+     * long, because its push connection is answered every few minutes. Ticks do not advance in deep
+     * sleep, which is what keeps a long doze from looking like silence.
+     */
+    private static final int BACKGROUND_SILENT_TICKS_BEFORE_PING = 2;
+
+    /**
+     * Minimum spacing between background pings, indexed by how many we have already spent without
+     * traffic coming back. The first entries are short so a genuinely dead server is confirmed and
+     * switched away from in a couple of minutes; the tail backs off so the pathological case - every
+     * server equally unreachable, nothing better to switch to - settles into a 5 minute poll instead
+     * of pinging on every tick.
+     */
+    private static final long[] BACKGROUND_PING_INTERVALS_MS = {60 * 1000L, 60 * 1000L, 120 * 1000L, 300 * 1000L};
 
     public interface Listener {
         void onVpnListChanged();
@@ -71,11 +93,12 @@ public class VpnController implements SingBoxManager.StateListener {
     private boolean autoSwitch;
     private boolean routeCalls;
     private int autoSwitchTimeoutIndex = DEFAULT_AUTOSWITCH_TIMEOUT_INDEX;
-    /** elapsedRealtime of the last ping actually sent, so the background floor survives deep sleep. */
+    /** elapsedRealtime of the last ping actually sent, so background ping spacing survives deep sleep. */
     private long lastHealthCheckElapsed;
     private boolean loaded;
     /**
-     * Consecutive failed health-check pings for {@link #currentVpn}. Auto-switch only fires once this
+     * Consecutive failed health-check pings for {@link #currentVpn}, foreground and background alike.
+     * Auto-switch only fires once this
      * reaches {@link #PING_FAILURES_BEFORE_SWITCH} - a single failure used to roll the server over, and
      * because every switch restarts the core, the replacement's first ping then failed too (it had not
      * handshaked yet) and switched again, so one hiccup cost several restarts. Any successful ping
@@ -83,6 +106,27 @@ public class VpnController implements SingBoxManager.StateListener {
      */
     private int consecutivePingFailures;
     private static final int PING_FAILURES_BEFORE_SWITCH = 3;
+
+    /**
+     * Set by tgnet, on tgnet's own threads, whenever any bytes arrive from Telegram; cleared by each
+     * background tick that reads it. While the VPN is on those bytes necessarily came through the
+     * tunnel, so this is a liveness signal for the current server that costs us nothing to collect
+     * and is, if anything, more truthful than the ping - a server carrying real traffic is working
+     * even if a fresh proxy handshake happens to time out on it.
+     *
+     * Static so tgnet can set it without forcing the singleton into existence on a network thread.
+     */
+    private static volatile boolean tgnetBytesSinceLastTick;
+
+    /** Consecutive background ticks that saw no inbound traffic at all. */
+    private int silentBackgroundTicks;
+    /**
+     * Background pings spent since traffic last flowed. Indexes {@link #BACKGROUND_PING_INTERVALS_MS},
+     * so it is also the backoff level. Deliberately survives {@link #switchToNext()}: if a long outage
+     * makes every server look dead, the backoff has to keep growing across switches, or we would cycle
+     * the whole list every couple of minutes and restart the core each time.
+     */
+    private int backgroundPingsWithoutTraffic;
 
     private final ArrayList<Listener> listeners = new ArrayList<>();
     private final Runnable autoSwitchRunnable = this::switchToNext;
@@ -166,6 +210,8 @@ public class VpnController implements SingBoxManager.StateListener {
         autoSwitch = value;
         save();
         if (value) {
+            silentBackgroundTicks = 0;
+            backgroundPingsWithoutTraffic = 0;
             scheduleHealthCheck();
         } else {
             AndroidUtilities.cancelRunOnUIThread(healthCheckRunnable);
@@ -263,6 +309,8 @@ public class VpnController implements SingBoxManager.StateListener {
     public void selectVpn(VpnKeyInfo info) {
         currentVpn = info;
         consecutivePingFailures = 0; // user picked a different server - clean slate
+        silentBackgroundTicks = 0;
+        backgroundPingsWithoutTraffic = 0; // deliberate user action, so drop the outage backoff too
         save();
         notifyList();
         if (enabled) {
@@ -273,6 +321,8 @@ public class VpnController implements SingBoxManager.StateListener {
     public void setEnabled(boolean value) {
         enabled = value;
         save();
+        silentBackgroundTicks = 0;
+        backgroundPingsWithoutTraffic = 0;
         if (enabled && currentVpn != null) {
             reconnect();
         } else {
@@ -329,6 +379,8 @@ public class VpnController implements SingBoxManager.StateListener {
             if (state == SingBoxManager.STATE_CONNECTED) {
                 AndroidUtilities.cancelRunOnUIThread(autoSwitchRunnable);
                 consecutivePingFailures = 0; // fresh core session - don't carry failures across it
+                silentBackgroundTicks = 0;
+                tgnetBytesSinceLastTick = false; // whatever arrived went through the previous tunnel
                 measurePing();
                 // Keep re-checking reachability on the chosen interval so a server that dies mid-session
                 // (not just at connect) triggers auto-switch.
@@ -355,15 +407,17 @@ public class VpnController implements SingBoxManager.StateListener {
 
     /**
      * Ping the current connection through the local proxy to show its latency/availability. When
-     * {@code allowAutoSwitch} is set (periodic health check only) a failure rolls over to the next
-     * connection.
+     * {@code allowAutoSwitch} is set (the health-check tick only) a failure counts towards rolling
+     * over to the next connection.
      *
      * We deliberately do NOT auto-switch on the connect-time ping: the core reports "connected" the
      * instant it starts, before the server has finished its handshake, so an immediate ping usually
      * fails - and since every switch tears the proxy down and starts a new one, switching on it would
      * tight-loop through every connection without any of them getting a chance to come up (exactly the
-     * runaway the user hit). Only the periodic health check switches, and it fires a full interval
-     * after connecting, giving each server time to become reachable first.
+     * runaway the user hit). Only the health-check tick switches, and it never fires straight after
+     * connecting: in the foreground it waits a full interval, in the background it first needs
+     * {@link #BACKGROUND_SILENT_TICKS_BEFORE_PING} ticks of total silence, either of which is long
+     * enough for a live server to have come up.
      */
     private void measurePing(boolean allowAutoSwitch) {
         final VpnKeyInfo info = currentVpn;
@@ -415,19 +469,24 @@ public class VpnController implements SingBoxManager.StateListener {
     }
 
     /**
-     * Schedule the next periodic reachability check. The auto-switch timeout slider doubles as the
-     * ping-check interval: every N seconds we re-measure the current connection and, on failure, roll
-     * over to the next one. No-op unless the VPN is on, auto-switch is enabled, and there's somewhere
-     * to switch to. Whether a given tick actually pings is decided in {@link #runHealthCheck()} - in
-     * the background most ticks are skipped.
+     * Schedule the next reachability tick. In the foreground the auto-switch timeout slider doubles as
+     * the ping interval: every N seconds we re-measure the current connection and, on failure, roll
+     * over to the next one. In the background the tick runs on {@link #BACKGROUND_TICK_MS} instead,
+     * because there most ticks cost nothing - whether one actually pings is decided in
+     * {@link #runHealthCheck()}. No-op unless the VPN is on, auto-switch is enabled, and there's
+     * somewhere to switch to.
      */
     private void scheduleHealthCheck() {
         AndroidUtilities.cancelRunOnUIThread(healthCheckRunnable);
         if (!enabled || !autoSwitch || vpnList.size() < 2) {
             return;
         }
-        int seconds = AUTOSWITCH_TIMEOUTS[Math.max(0, Math.min(autoSwitchTimeoutIndex, AUTOSWITCH_TIMEOUTS.length - 1))];
-        AndroidUtilities.runOnUIThread(healthCheckRunnable, seconds * 1000L);
+        long delay = BACKGROUND_TICK_MS;
+        if (isInForeground()) {
+            int seconds = AUTOSWITCH_TIMEOUTS[Math.max(0, Math.min(autoSwitchTimeoutIndex, AUTOSWITCH_TIMEOUTS.length - 1))];
+            delay = seconds * 1000L;
+        }
+        AndroidUtilities.runOnUIThread(healthCheckRunnable, delay);
     }
 
     /**
@@ -438,9 +497,15 @@ public class VpnController implements SingBoxManager.StateListener {
         return ApplicationLoader.isScreenOn && !ApplicationLoader.mainInterfacePaused;
     }
 
+    /** Called by tgnet for every inbound byte, on tgnet's threads. Keep it to the single store. */
+    public static void onTgnetBytesReceived() {
+        tgnetBytesSinceLastTick = true;
+    }
+
     /**
-     * The timer keeps ticking at the user's interval, but in the background we let most ticks pass
-     * without pinging. That matters more than it looks: a ping is not a UDP echo, it is
+     * Decide whether this tick is worth a ping, and ping if so.
+     *
+     * The distinction matters more than it looks, because a ping is not a UDP echo: it is
      * {@code ConnectionsManager.checkProxy}, which suspends the proxy connection and re-dials it, so
      * sing-box opens a brand new outbound to the VPN server every time. Two consequences:
      *
@@ -454,25 +519,64 @@ public class VpnController implements SingBoxManager.StateListener {
      *      queue is walked every second. The sleep timer is 10s (CONNECTION_BACKGROUND_KEEP_TIME), so
      *      the old 10s default meant it could essentially never stay asleep.
      *
-     * Leaving the timer running (rather than cancelling it while backgrounded) means no foreground
-     * hook is needed anywhere: the first tick after the user comes back sees the app in front and goes
-     * straight back to the fast cadence. The tick itself is a main-looper post - no wakelock, no alarm,
-     * and it does not fire at all while the device is in deep sleep.
+     * So in the background we do not ping on a timer at all. Instead each tick asks whether tgnet has
+     * received anything since the last one ({@link #tgnetBytesSinceLastTick}). If it has, the tunnel
+     * is carrying traffic and the server is alive - proven for free, no packet spent, and proven more
+     * convincingly than a ping could. Only a tunnel that has gone completely silent while the device
+     * was awake gets pinged, and then quickly, until it either answers or is switched away from.
+     *
+     * That is what makes this both cheaper and faster than the 5 minute background floor it replaces:
+     * a healthy backgrounded client now spends *zero* pings, while a server that dies is confirmed
+     * dead and rolled over in a couple of minutes instead of the 15-40 that the floor plus Doze cost.
+     *
+     * Deep sleep needs no special handling: ticks are main-looper posts, so they stop when the device
+     * suspends and resume with it, and a silent stretch spent asleep never counts as silence.
      */
     private void runHealthCheck() {
-        if (!enabled || currentVpn == null
-                || SingBoxManager.getInstance().getState() != SingBoxManager.STATE_CONNECTED) {
-            return;
+        boolean trafficFlowed = tgnetBytesSinceLastTick;
+        tgnetBytesSinceLastTick = false;
+        if (enabled && currentVpn != null
+                && SingBoxManager.getInstance().getState() == SingBoxManager.STATE_CONNECTED) {
+            if (trafficFlowed) {
+                // Checked before the foreground branch, not inside the background one: traffic proves
+                // the tunnel either way, and a user who opens the app mid-outage must not leave the
+                // backoff behind them when they close it again.
+                silentBackgroundTicks = 0;
+                backgroundPingsWithoutTraffic = 0;
+            }
+            if (isInForeground()) {
+                // The user is looking at the list, so the ping is paying for the latency they see as
+                // well as for auto-switch. Keep their chosen cadence.
+                measurePing(true);
+            } else if (!trafficFlowed
+                    && ++silentBackgroundTicks >= BACKGROUND_SILENT_TICKS_BEFORE_PING
+                    && SystemClock.elapsedRealtime() - lastHealthCheckElapsed >= backgroundPingIntervalMs()) {
+                if (ApplicationLoader.isNetworkOnline()) {
+                    if (BuildVars.LOGS_ENABLED) {
+                        FileLog.d("VpnController: no tgnet traffic through the tunnel for "
+                                + silentBackgroundTicks + " ticks - checking the server (backoff level "
+                                + backgroundPingsWithoutTraffic + ")");
+                    }
+                    backgroundPingsWithoutTraffic++;
+                    measurePing(true);
+                } else if (BuildVars.LOGS_ENABLED
+                        && silentBackgroundTicks == BACKGROUND_SILENT_TICKS_BEFORE_PING) {
+                    // Airplane mode, no coverage. The silence is not the server's fault and there is
+                    // nothing better to switch to, so don't spend a handshake on it. Logged once per
+                    // silent stretch rather than every tick.
+                    FileLog.d("VpnController: tunnel silent but the device is offline - not checking");
+                }
+            }
         }
-        // elapsedRealtime, not uptimeMillis: time spent in deep sleep must count towards the floor,
-        // otherwise a phone that was asleep for an hour pings the moment it wakes.
-        boolean due = isInForeground()
-                || SystemClock.elapsedRealtime() - lastHealthCheckElapsed >= BACKGROUND_MIN_INTERVAL_MS;
-        if (due) {
-            // measurePing(true) switches to the next connection if this one has stopped responding.
-            measurePing(true);
-        }
+        // Always re-arm, even when the checks above bailed out: scheduleHealthCheck() decides for
+        // itself whether a next tick is wanted, and returning early here used to kill the chain
+        // outright until some unrelated event happened to restart it.
         scheduleHealthCheck();
+    }
+
+    private long backgroundPingIntervalMs() {
+        int level = Math.min(backgroundPingsWithoutTraffic, BACKGROUND_PING_INTERVALS_MS.length - 1);
+        return BACKGROUND_PING_INTERVALS_MS[level];
     }
 
     private void switchToNext() {
@@ -496,6 +600,7 @@ public class VpnController implements SingBoxManager.StateListener {
         }
         currentVpn = vpnList.get(next);
         consecutivePingFailures = 0; // the new server gets a clean slate
+        silentBackgroundTicks = 0;   // ...and a fresh silence window to prove itself in
         save();
         notifyList();
         reconnect();

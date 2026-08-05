@@ -925,6 +925,9 @@ public class ConnectionsManager extends BaseController {
     }
 
     public static void onBytesReceived(int amount, int networkType, final int currentAccount) {
+        // While the VPN is on every one of these bytes came through the tunnel, which makes this the
+        // cheapest possible proof that the current server is alive - see VpnController.runHealthCheck.
+        VpnController.onTgnetBytesReceived();
         try {
             StatsController.getInstance(currentAccount).incrementReceivedBytesCount(networkType, StatsController.TYPE_TOTAL, amount);
         } catch (Exception e) {
