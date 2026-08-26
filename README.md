@@ -89,7 +89,7 @@ the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg
 
 ## Todo / known issues
 
-- **Battery drain compared to the official client.** Two causes, one fixed in 1.2.4. (a) *Fixed:* with
+- **Battery drain compared to the official client.** Three causes, two of them fixed. (a) *Fixed in 1.2.4:* with
   auto-switch on, the health check re-pinged the current connection every 10s by default, screen off
   or not. Each check is a `ConnectionsManager.checkProxy`, which suspends and re-dials the proxy
   connection, so sing-box opened a fresh outbound to the VPN server every time. That pinned the
@@ -99,8 +99,19 @@ the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg
   and the poll interval drops from ~3min back to 1s. With the sleep timer itself at 10s
   (`CONNECTION_BACKGROUND_KEEP_TIME`) the app could never stay asleep. Now the user's interval applies
   only in the foreground, the ladder is 30s/1m/2m/5m defaulting to 2m, and backgrounded the app does
-  not ping on a timer at all - see the auto-switch note below. (b) *Structural, not fixable:* the fork
-  can't use FCM, so it force-enables tgnet's push
+  not ping on a timer at all - see the auto-switch note below. (b) *Fixed in 1.3.1:* an address the VPN
+  server could not route to cost 2m7s per attempt instead of failing fast. The wireguard endpoint dials
+  inside its own userspace network stack, which reads the deadline from its caller, and no caller set
+  one, so each dial ran until that stack's SYN schedule exhausted. A user log recorded 1487 of them
+  against a single dead Telegram media address in 30 hours, 63 open at once, at least one open for 28%
+  of the whole window - each a stream of encrypted UDP retransmits holding the cellular radio out of
+  its idle state. Two changes. The generated config now sets `connect_timeout` to 10s on the endpoint,
+  and the core is patched to apply it to the dial through the tunnel (`patches/`); 10s sits above a
+  real handshake and below tgnet's own 8-12s socket timeout, so nothing is spent on a connection tgnet
+  has already given up on. tgnet now also counts consecutive failed connects the way it already counted
+  connected-but-silent drops, and backs the re-dial off 1s, 2s, 4s and so on to 30s from the third
+  failure, so a datacenter that comes back is still retried within 30s. (c) *Structural, not fixable:*
+  the fork can't use FCM, so it force-enables tgnet's push
   connection and runs a foreground service whenever the VPN is on. The official client shares one FCM
   socket across the whole device and lets the process be frozen.
 - **The VPN overwrites the user's "Background Connection" setting.** `updateBackgroundKeepAlive()`

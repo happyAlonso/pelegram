@@ -30,6 +30,12 @@ import java.util.zip.Inflater;
  */
 public class SingBoxConfigBuilder {
 
+    /**
+     * Ceiling on a single TCP connect made through the wireguard tunnel. Comfortably above a real
+     * handshake (measured tunnel latency is 60-300ms) and below tgnet's own 8-12s socket timeout.
+     */
+    private static final String TUNNEL_CONNECT_TIMEOUT = "10s";
+
     public static final String TAG_PROXY = "proxy-out";
     public static final String TAG_SOCKS_IN = "socks-in";
 
@@ -86,6 +92,15 @@ public class SingBoxConfigBuilder {
         root.put("inbounds", new JSONArray().put(socksIn));
         // wireguard (incl. AmneziaWG) is an `endpoint`, not an `outbound`, in current sing-box.
         if ("wireguard".equals(outbound.optString("type"))) {
+            // Bound how long a TCP connect through the tunnel may hang. The wireguard endpoint dials
+            // inside its own userspace network stack, which takes its deadline from the caller, and no
+            // caller sets one - so an address the VPN server cannot reach is retried by that stack's
+            // own SYN schedule until it exhausts, 2m7s later. A user log showed 1487 of those to a
+            // single dead Telegram media address in 30h, 63 of them in flight at once, each one a
+            // stream of encrypted UDP retransmits keeping the radio out of its idle state. tgnet gives
+            // up on its own socket after 8-12s (Connection::connect), so anything past that is spent
+            // on a connection nobody is waiting for any more.
+            outbound.put("connect_timeout", TUNNEL_CONNECT_TIMEOUT);
             root.put("endpoints", new JSONArray().put(outbound));
             root.put("outbounds", new JSONArray().put(direct));
         } else {

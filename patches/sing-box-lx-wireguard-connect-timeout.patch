@@ -1,0 +1,130 @@
+diff --git a/protocol/wireguard/endpoint.go b/protocol/wireguard/endpoint.go
+index abdb7a7..854fbcb 100644
+--- a/protocol/wireguard/endpoint.go
++++ b/protocol/wireguard/endpoint.go
+@@ -72,6 +72,16 @@ type Endpoint struct {
+ 	idleAsleep   atomic.Bool
+ 	resumeMu     sync.Mutex
+ 	// lx:end idle-suspend
++	// connectTimeout bounds a TCP connect made *through* the tunnel. The netstack dial
++	// (DialTCPWithBind -> gVisor) takes its deadline from the context and nothing upstream
++	// sets one, so a black-holed destination is retried by gVisor's own SYN schedule until
++	// it exhausts, ~2m7s. Every one of those holds a goroutine, a netstack endpoint and a
++	// stream of encrypted UDP retransmits on the radio, long after the client that asked
++	// for the connection has given up. A user log showed 1487 such dials to a single
++	// unreachable Telegram media address in 30h, with 63 of them in flight at once.
++	// Taken from `connect_timeout` on the endpoint, defaulting to the same
++	// C.TCPConnectTimeout the direct dialer already applies to a connect it owns.
++	connectTimeout time.Duration
+ }
+ 
+ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.WireGuardEndpointOptions) (adapter.Endpoint, error) {
+@@ -86,6 +96,10 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
+ 		awgActive: options.AmneziaWGOptions.IsSet(),
+ 		detour:    options.Detour,
+ 		// lx:end awg
++		connectTimeout: time.Duration(options.ConnectTimeout),
++	}
++	if ep.connectTimeout <= 0 {
++		ep.connectTimeout = C.TCPConnectTimeout
+ 	}
+ 	if options.Detour != "" && options.ListenPort != 0 {
+ 		return nil, E.New("`listen_port` is conflict with `detour`")
+@@ -427,6 +441,8 @@ func (w *Endpoint) DialContext(ctx context.Context, network string, destination
+ 	if !w.resumeOnDial() { // lx: SPEC 020 — stamp activity + wake if idle-suspended
+ 		return nil, E.New("WireGuard is not ready yet")
+ 	}
++	ctx, cancel := w.dialDeadlineContext(ctx, network)
++	defer cancel()
+ 	if destination.IsDomain() {
+ 		destinationAddresses, err := w.dnsRouter.Lookup(ctx, destination.Fqdn, adapter.DNSQueryOptions{})
+ 		if err != nil {
+@@ -439,6 +455,22 @@ func (w *Endpoint) DialContext(ctx context.Context, network string, destination
+ 	return w.endpoint.DialContext(ctx, network, destination)
+ }
+ 
++// dialDeadlineContext bounds a TCP connect made through the tunnel.
++//
++// gVisor only consults the context while it is establishing the stream, and DialTCPWithBind
++// closes the endpoint on cancellation, so cancelling once the dial has returned cannot disturb
++// a connection that came up - the same contract net.Dialer documents. A caller that set its own
++// deadline keeps it; UDP has no connect and is left alone.
++func (w *Endpoint) dialDeadlineContext(ctx context.Context, network string) (context.Context, context.CancelFunc) {
++	if w.connectTimeout <= 0 || N.NetworkName(network) != N.NetworkTCP {
++		return ctx, func() {}
++	}
++	if _, hasDeadline := ctx.Deadline(); hasDeadline {
++		return ctx, func() {}
++	}
++	return context.WithTimeout(ctx, w.connectTimeout)
++}
++
+ func (w *Endpoint) ListenPacketWithDestination(ctx context.Context, destination M.Socksaddr) (net.PacketConn, netip.Addr, error) {
+ 	w.logger.InfoContext(ctx, "outbound packet connection to ", destination)
+ 	if !w.resumeOnDial() { // lx: SPEC 020 — stamp activity + wake if idle-suspended
+diff --git a/protocol/wireguard/endpoint_connect_timeout_lx_test.go b/protocol/wireguard/endpoint_connect_timeout_lx_test.go
+new file mode 100644
+index 0000000..bcc7a89
+--- /dev/null
++++ b/protocol/wireguard/endpoint_connect_timeout_lx_test.go
+@@ -0,0 +1,60 @@
++package wireguard
++
++import (
++	"context"
++	"testing"
++	"time"
++
++	N "github.com/sagernet/sing/common/network"
++)
++
++// A TCP connect through the tunnel must carry a deadline. Without one the gVisor dial retries
++// its own SYN schedule to exhaustion (~2m7s to a black-holed address), holding a goroutine, a
++// netstack endpoint and encrypted UDP retransmits on the radio long after the caller gave up.
++func TestDialDeadlineContextBoundsTCP(t *testing.T) {
++	t.Parallel()
++	ep := &Endpoint{connectTimeout: 10 * time.Second}
++	ctx, cancel := ep.dialDeadlineContext(context.Background(), N.NetworkTCP)
++	defer cancel()
++	deadline, ok := ctx.Deadline()
++	if !ok {
++		t.Fatal("expected a deadline on a TCP dial context")
++	}
++	if remaining := time.Until(deadline); remaining <= 0 || remaining > 10*time.Second {
++		t.Fatalf("deadline %v is not the configured 10s bound", remaining)
++	}
++}
++
++// A caller that set its own deadline knows better than the endpoint default.
++func TestDialDeadlineContextKeepsCallerDeadline(t *testing.T) {
++	t.Parallel()
++	ep := &Endpoint{connectTimeout: 10 * time.Second}
++	parent, parentCancel := context.WithTimeout(context.Background(), time.Second)
++	defer parentCancel()
++	ctx, cancel := ep.dialDeadlineContext(parent, N.NetworkTCP)
++	defer cancel()
++	deadline, ok := ctx.Deadline()
++	if !ok {
++		t.Fatal("expected the caller deadline to survive")
++	}
++	if remaining := time.Until(deadline); remaining > time.Second {
++		t.Fatalf("caller deadline was widened to %v", remaining)
++	}
++}
++
++// UDP has no connect to bound, and a zero timeout means the feature is off.
++func TestDialDeadlineContextLeavesUDPAndZeroAlone(t *testing.T) {
++	t.Parallel()
++	ep := &Endpoint{connectTimeout: 10 * time.Second}
++	ctx, cancel := ep.dialDeadlineContext(context.Background(), N.NetworkUDP)
++	defer cancel()
++	if _, ok := ctx.Deadline(); ok {
++		t.Fatal("UDP dial context must not get a connect deadline")
++	}
++	off := &Endpoint{}
++	ctx, cancel = off.dialDeadlineContext(context.Background(), N.NetworkTCP)
++	defer cancel()
++	if _, ok := ctx.Deadline(); ok {
++		t.Fatal("a zero connectTimeout must leave the context untouched")
++	}
++}

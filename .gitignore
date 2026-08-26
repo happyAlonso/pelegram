@@ -20,3 +20,7 @@ TMessagesProj/jni/ffmpeg/build_android
 
 # gomobile bind byproduct (not shipped)
 TMessagesProj/libs/libbox-lx-sources.jar
+
+# Kotlin 2.x build-service state, created by any Gradle run
+.kotlin/
+buildSrc/.kotlin/

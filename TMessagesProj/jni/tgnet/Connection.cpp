@@ -50,6 +50,11 @@ void Connection::suspendConnection() {
 void Connection::suspendConnection(bool idle) {
     reconnectTimer->stop();
     waitForReconnectTimer = false;
+    // A deliberate suspend means something the caller controls has changed - proxy settings, the
+    // network, the datacenter address list. Start the failed-connect ladder over so the app is not
+    // still sitting out a delay it earned against the old conditions. Every caller of this is such a
+    // change; the request-driven re-dial loop the throttle exists to stop goes through connect().
+    connectFailedCount = 0;
     if (connectionState == TcpConnectionStageIdle || connectionState == TcpConnectionStageSuspended) {
         return;
     }
@@ -663,6 +668,14 @@ void Connection::onDisconnectedInternal(int32_t reason, int32_t error) {
     // through the current proxy: the local SOCKS hop to 127.0.0.1 always succeeds, but the real
     // endpoint never answers. This is used to throttle the re-dial further down.
     bool connectedButNoData = wasConnected && !hasSomeDataSinceLastConnect;
+    // The other half of the same problem: a socket that never came up at all. Through the tunnel a
+    // black-holed address does not fail fast, so this connection's own 8-12s timeout (see connect())
+    // fires first with reason 2 and error 0 - which reaches neither the ECONNRESET branch nor the
+    // 1000ms timer below, leaving the request loop free to re-dial immediately. Reason 0 is a
+    // deliberate drop from suspendConnection, never a failure. A dial that failed while the device
+    // had no network is the radio's fault, not the address's, so it is not counted either.
+    bool connectFailed = !wasConnected && reason != 0
+            && ConnectionsManager::getInstance(currentDatacenter->instanceNum).isNetworkAvailable();
     bool switchToNextPort = reason == 2 && wasConnected && (!hasSomeDataSinceLastConnect || currentDatacenter->isCustomPort(currentAddressFlags)) || forceNextPort;
     if (connectionType == ConnectionTypeGeneric || connectionType == ConnectionTypeTemp || connectionType == ConnectionTypeGenericMedia) {
         if (wasConnected && reason == 2 && currentTimeout < 16) {
@@ -711,6 +724,13 @@ void Connection::onDisconnectedInternal(int32_t reason, int32_t error) {
         } else {
             connectedNoDataCount = 0;
         }
+        if (connectFailed) {
+            connectFailedCount++;
+        } else if (!ConnectionsManager::getInstance(currentDatacenter->instanceNum).isNetworkAvailable()) {
+            // Coverage came and went. Start the ladder over so the first attempt after the radio
+            // returns is immediate rather than sitting out a delay earned during the outage.
+            connectFailedCount = 0;
+        }
         // Endpoint keeps accepting the socket but never answers. Without a timer guard,
         // ConnectionsManager re-dials this connection on every request-loop pass (via
         // getConnectionByType(..., true) -> connect()), which produced ~2 reconnects/sec all night
@@ -718,6 +738,10 @@ void Connection::onDisconnectedInternal(int32_t reason, int32_t error) {
         // guard - connect() no-ops while it is set - with an exponential, capped delay so a DC that
         // comes back still recovers within ~30s. Not applied to the proxy connection itself.
         const uint32_t NO_DATA_THROTTLE_AFTER = 2; // allow a couple of quick retries first
+        // Address rotation needs two failures to fire (failedConnectionCount > willRetryConnectCount,
+        // which is 1 without pending data), so the third consecutive failure is the first one that
+        // says the datacenter is unreachable rather than one address of it being down.
+        const uint32_t CONNECT_FAIL_THROTTLE_AFTER = 3;
         if (connectedButNoData && connectedNoDataCount >= NO_DATA_THROTTLE_AFTER && connectionType != ConnectionTypeProxy) {
             waitForReconnectTimer = true;
             uint32_t shift = connectedNoDataCount - NO_DATA_THROTTLE_AFTER;
@@ -730,6 +754,22 @@ void Connection::onDisconnectedInternal(int32_t reason, int32_t error) {
             }
             if (LOGS_ENABLED) DEBUG_D("connection(%p, account%u, dc%u, type %d) no-data reconnect throttle %u ms (count %u)", this, currentDatacenter->instanceNum, currentDatacenter->getDatacenterId(), connectionType, noDataTimeout, connectedNoDataCount);
             reconnectTimer->setTimeout(noDataTimeout, false);
+            reconnectTimer->start();
+        } else if (connectFailed && connectFailedCount >= CONNECT_FAIL_THROTTLE_AFTER && connectionType != ConnectionTypeProxy) {
+            // Same guard, same ladder as the no-data case above: connect() no-ops while
+            // waitForReconnectTimer is set, so the request loop stops re-dialing an address that
+            // cannot be reached, and a datacenter that comes back is retried within 30s.
+            waitForReconnectTimer = true;
+            uint32_t shift = connectFailedCount - CONNECT_FAIL_THROTTLE_AFTER;
+            if (shift > 5) {
+                shift = 5;
+            }
+            uint32_t connectFailTimeout = 1000u << shift; // 1s, 2s, 4s, 8s, 16s, 32s
+            if (connectFailTimeout > 30000) {
+                connectFailTimeout = 30000;
+            }
+            if (LOGS_ENABLED) DEBUG_D("connection(%p, account%u, dc%u, type %d) failed-connect throttle %u ms (count %u) for %s:%hu", this, currentDatacenter->instanceNum, currentDatacenter->getDatacenterId(), connectionType, connectFailTimeout, connectFailedCount, hostAddress.c_str(), hostPort);
+            reconnectTimer->setTimeout(connectFailTimeout, false);
             reconnectTimer->start();
         } else if (error == 0x68 || error == 0x71) {
             if (connectionType != ConnectionTypeProxy) {
@@ -767,6 +807,7 @@ void Connection::onConnected() {
     connectionState = TcpConnectionStageConnected;
     connectionToken = lastConnectionToken++;
     wasConnected = true;
+    connectFailedCount = 0; // the address answered - clear the failed-connect throttle
     if (LOGS_ENABLED) DEBUG_D("connection(%p, account%u, dc%u, type %d) connected to %s:%hu", this, currentDatacenter->instanceNum, currentDatacenter->getDatacenterId(), connectionType, hostAddress.c_str(), hostPort);
     ConnectionsManager::getInstance(currentDatacenter->instanceNum).onConnectionConnected(this);
 }
