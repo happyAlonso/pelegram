@@ -65,7 +65,7 @@ the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg
 
 ## Status
 
-- Based on official Telegram **12.9.0** (TL layer 228), kept current with periodic rebases onto upstream.
+- Based on official Telegram **12.10.1** (TL layer 229), kept current with periodic rebases onto upstream.
 - Embedded sing-box core, key parsing, the key management UI, and connect/disconnect wiring are
   integrated and shipping.
 - Calls, the in-app browser, auto-switch between keys, reconnect throttling, background push, and
@@ -120,10 +120,17 @@ the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg
 
 ## Building from source
 
-Requirements: Android SDK (compile SDK 35), NDK `27.2.12479018`, JDK 17, and Go (for building the
+Requirements: Android SDK (compile SDK 36), NDK `27.2.12479018`, JDK 17, and Go (for building the
 tunnel core). See `VPN_FEATURE_PLAN.md` for the full design and integration notes.
 
-1. **Provide your own api_id / api_hash.** pelegram reads them at build time from a gitignored
+1. **Fetch the submodules.** Upstream keeps ffmpeg, dav1d, libvpx, libyuv, openh264, ogg/opus/opusfile,
+   tlottie and jlatexmath as git submodules:
+   ```
+   git submodule update --init --recursive --depth=1
+   ```
+   The prebuilt static libraries under `TMessagesProj/jni/ffmpeg/<abi>` are committed, so the
+   submodules are only needed for `:jlatexmath`, `tlottie`, and for rebuilding those libraries.
+2. **Provide your own api_id / api_hash.** pelegram reads them at build time from a gitignored
    `secrets/` directory at the repo root so they never land in source control:
    ```
    secrets/api_id      # your numeric api_id from https://my.telegram.org
@@ -131,13 +138,13 @@ tunnel core). See `VPN_FEATURE_PLAN.md` for the full design and integration note
    ```
    Get them at https://my.telegram.org. Without this, the build falls back to Telegram's public
    placeholder values.
-2. **Build the tunnel core** (produces `TMessagesProj/libs/libbox-lx.aar`, arm64-v8a):
+3. **Build the tunnel core** (produces `TMessagesProj/libs/libbox-lx.aar`, arm64-v8a):
    ```
    ANDROID_HOME=~/Android/Sdk ./Tools/build-singbox-lx.sh
    ```
    A prebuilt `libbox-lx.aar` is committed, so you can skip this unless you want to rebuild the core.
-3. **Point Gradle at your SDK** with a `local.properties` file (`sdk.dir=/path/to/Android/Sdk`).
-4. **Build the APK:**
+4. **Point Gradle at your SDK** with a `local.properties` file (`sdk.dir=/path/to/Android/Sdk`).
+5. **Build the APK:**
    ```
    ./gradlew :TMessagesProj_App:assembleAfatDebug
    ```
