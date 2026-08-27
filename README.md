@@ -127,7 +127,30 @@ the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg
   `onLowMemory` signals, and writes an OOM report - heap and native usage, tunnel state, the download
   queue depth and the stack - into the logs directory so it ships with **Send Logs**. With logging
   enabled it also writes an `.hprof` heap dump to `files/oom/`. Still watching for a report that
-  names the exact consumer; the caps are a mitigation, not a confirmed root-cause fix.
+  names the exact consumer; the caps are a mitigation, not a confirmed root-cause fix. A 1.2.5 log
+  from 22-23 Aug 2026 shows it still happening: five `OutOfMemoryError` inside 40 seconds against the
+  512 MB heap limit, then a process restart nine minutes later. So `MemoryGuard` reduces the odds
+  without closing the hole.
+- **The tunnel MTU is too large for some links.** The same log carries 853 `sendmsg: message too
+  long` from the AmneziaWG socket, 776 of them inside one hour. That is `EMSGSIZE`: the encapsulated
+  packet is bigger than the path underneath it will take, so it is dropped before it leaves the phone.
+  Earlier this was dismissed as harmless, on the strength of a burst of 33-40 seen only at the first
+  connect; at 776 an hour, on one network and not on others, it is a real mismatch rather than a
+  startup artifact. `SingBoxConfigBuilder` defaults the MTU to 1280 only when the key omits it, and an
+  AmneziaVPN `vpn://` key carries its own value in `last_config`, which wins. The fix is probably to
+  cap what a key may ask for, or to discover the path MTU instead of trusting the key.
+- **Some connections still go to IPv6 datacenters the tunnel cannot carry.** `getIpStrategy()` returns
+  `USE_IPV4_ONLY` whenever the VPN is on, and the log confirms the strategy reached the core
+  ("selected ip strategy 0"), yet 257 dials went to `2001:67c:4e8:f002::a` and died inside the tunnel
+  with "missing IPv6 local address". Something picks an address without consulting the strategy, so
+  the v1.1.7 fix is incomplete. Each failure is small on its own; together they are a steady trickle of
+  dials that cannot succeed.
+- **The stories preloader re-runs constantly.** 11104 of 12498 file-load operations in that log were
+  stories, covering 4803 distinct files; one 14.5 MB video was queued 214 times. The repeats are cheap
+  because the file is already cached, so each one finishes in about 3 ms and sends nothing over the
+  network. The trigger is leaving a mini-app or web view, which brings the dialog list back and makes
+  the stories bar preload again. This is upstream behaviour and not a battery problem, but it dominates
+  the log and hides real download activity while reading one.
 
 ## Building from source
 
