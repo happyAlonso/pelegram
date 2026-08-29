@@ -38040,6 +38040,16 @@ public class ChatActivity extends BaseFragment implements
         }
 
         @Override
+        public void onViewRecycled(@NonNull RecyclerView.ViewHolder holder) {
+            if (holder.itemView instanceof ChatMessageCell) {
+                // A recycled cell may never get a window-detach callback (bound for prefetch and
+                // dropped, or retired from the pool), and animated-emoji holders it registered would
+                // then pin it forever through the static globalEmojiCache. Rebinding re-creates them.
+                ((ChatMessageCell) holder.itemView).releaseAnimatedEmojis();
+            }
+        }
+
+        @Override
         public void onViewAttachedToWindow(RecyclerView.ViewHolder holder) {
             if (holder.itemView instanceof ChatMessageCell || holder.itemView instanceof ChatActionCell) {
                 invalidateMessagesVisiblePart();

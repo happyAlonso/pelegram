@@ -126,11 +126,17 @@ the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg
   traffic (and drops to one under pressure), sheds the image caches on Android's `onTrimMemory` /
   `onLowMemory` signals, and writes an OOM report - heap and native usage, tunnel state, the download
   queue depth and the stack - into the logs directory so it ships with **Send Logs**. With logging
-  enabled it also writes an `.hprof` heap dump to `files/oom/`. Still watching for a report that
-  names the exact consumer; the caps are a mitigation, not a confirmed root-cause fix. A 1.2.5 log
-  from 22-23 Aug 2026 shows it still happening: five `OutOfMemoryError` inside 40 seconds against the
-  512 MB heap limit, then a process restart nine minutes later. So `MemoryGuard` reduces the odds
-  without closing the hole.
+  enabled it also writes an `.hprof` heap dump to `files/oom/`. That dump is what closed the case.
+  *Root cause found and fixed in 1.3.2:* a heap dump from a 1.3.1 install 75 hours up (the one behind
+  the "chat opens slowly" complaint) held 63 dead `LaunchActivity` instances, 265 MB of the 417 MB
+  reachable heap, every one pinned through the global `NotificationCenter` by an upstream one-line
+  bug: `ChatBackgroundDrawable.onDetachedFromWindow` inverts its `contains` check, never removes the
+  view, and so never lets its `ImageReceiver` drop its three observers. A second, smaller leak kept
+  dead `ChatMessageCell`s through animated-emoji holders in the static `globalEmojiCache` - released
+  now on detach and on recycle. The inverted check is still present in upstream DrKLO master.
+  `MemoryGuard`'s caps stay: the slow-tunnel pileup they were built for is real regardless, and the
+  freeze-then-restart the leak produced (GC storms once the heap ceiling is near) is exactly what the
+  reporter felt as a chat that would not open.
 - **The tunnel MTU is too large for some links.** The same log carries 853 `sendmsg: message too
   long` from the AmneziaWG socket, 776 of them inside one hour. That is `EMSGSIZE`: the encapsulated
   packet is bigger than the path underneath it will take, so it is dropped before it leaves the phone.

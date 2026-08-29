@@ -256,9 +256,11 @@ public class ChatBackgroundDrawable extends Drawable {
     }
 
     public void onDetachedFromWindow(View view) {
-        if (!attachedViews.contains(view)) {
-            attachedViews.remove(view);
-        }
+        // The condition here was inverted (`if (!attachedViews.contains(view)) remove`), so a view
+        // was never removed and the ImageReceiver below never detached. Its three observers stayed
+        // on the global NotificationCenter and pinned every destroyed activity: a 75h heap dump held
+        // 63 LaunchActivity instances, 265 MB, all hanging off this list.
+        attachedViews.remove(view);
         if (isAttached() && !attached) {
             attached = true;
             imageReceiver.onAttachedToWindow();

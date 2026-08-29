@@ -979,6 +979,12 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
             if (pollButtonDrawable != null) {
                 pollButtonDrawable.attach();
             }
+            if (title != null) {
+                animatedEmoji = AnimatedEmojiSpan.update(AnimatedEmojiDrawable.CACHE_TYPE_MESSAGES, ChatMessageCell.this, false, animatedEmoji, title);
+            }
+            if (animateTitle != null) {
+                animateTitleEmoji = AnimatedEmojiSpan.update(AnimatedEmojiDrawable.CACHE_TYPE_MESSAGES, ChatMessageCell.this, false, animateTitleEmoji, animateTitle);
+            }
         }
 
         public void detach() {
@@ -988,13 +994,16 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
             if (pollButtonDrawable != null) {
                 pollButtonDrawable.detach();
             }
+            // Emoji holders must not survive a detach: each one sits in the holders list of an
+            // AnimatedEmojiDrawable that the static globalEmojiCache keeps forever, so a holder left
+            // behind pins this cell and its whole view tree. attach() registers them again.
+            AnimatedEmojiSpan.release(ChatMessageCell.this, animatedEmoji);
+            AnimatedEmojiSpan.release(ChatMessageCell.this, animateTitleEmoji);
         }
 
         public void destroy() {
             detach();
-            AnimatedEmojiSpan.release(ChatMessageCell.this, animatedEmoji);
             animatedEmoji = null;
-            AnimatedEmojiSpan.release(ChatMessageCell.this, animateTitleEmoji);
             animateTitleEmoji = null;
         }
     }
@@ -6227,6 +6236,28 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
         }
     }
 
+    /**
+     * Drops every animated-emoji holder this cell registered. A holder lives in the holders list of
+     * an AnimatedEmojiDrawable that the static globalEmojiCache never evicts, so a cell that leaves
+     * the RecyclerView without a window-detach callback (bound for prefetch and dropped, or retired
+     * from the recycled pool) stays pinned forever otherwise. Rebinding recreates everything, so
+     * calling this from onViewRecycled cannot lose visible state.
+     */
+    public void releaseAnimatedEmojis() {
+        AnimatedEmojiSpan.release(this, animatedEmojiStack);
+        AnimatedEmojiSpan.release(this, animatedEmojiReplyStack);
+        AnimatedEmojiSpan.release(this, animatedEmojiDescriptionStack);
+        AnimatedEmojiSpan.release(this, animatedEmojiPollQuestion);
+        AnimatedEmojiSpan.release(this, animatedEmojiPollExplanation);
+        animatedEmojiPollQuestion = null;
+        animatedEmojiPollExplanation = null;
+        for (int i = 0; i < pollButtons.size(); i++) {
+            PollButton button = pollButtons.get(i);
+            AnimatedEmojiSpan.release(this, button.animatedEmoji);
+            AnimatedEmojiSpan.release(this, button.animateTitleEmoji);
+        }
+    }
+
     private boolean isUserDataChanged() {
         if (currentMessageObject != null && (!hasLinkPreview && MessageObject.getMedia(currentMessageObject.messageOwner) != null && MessageObject.getMedia(currentMessageObject.messageOwner).webpage instanceof TLRPC.TL_webPage)) {
             return true;
@@ -6651,6 +6682,15 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
                 }
                 animatedEmojiReplyStack = AnimatedEmojiSpan.update(AnimatedEmojiDrawable.CACHE_TYPE_MESSAGES, this, false, animatedEmojiReplyStack, replyTextLayout);
                 animatedEmojiDescriptionStack = AnimatedEmojiSpan.update(AnimatedEmojiDrawable.CACHE_TYPE_MESSAGES, this, false, animatedEmojiDescriptionStack, descriptionLayout);
+                // A non-null poll stack means setPoll registered holders that the detach branch below
+                // released; put them back. Guarded by nullness so a recycled non-poll cell does not
+                // register its unrelated titleLayout here.
+                if (animatedEmojiPollQuestion != null && titleLayout != null) {
+                    animatedEmojiPollQuestion = AnimatedEmojiSpan.update(AnimatedEmojiDrawable.CACHE_TYPE_MESSAGES, this, false, animatedEmojiPollQuestion, titleLayout);
+                }
+                if (animatedEmojiPollExplanation != null && explanationLayout != null) {
+                    animatedEmojiPollExplanation = AnimatedEmojiSpan.update(AnimatedEmojiDrawable.CACHE_TYPE_MESSAGES, this, false, animatedEmojiPollExplanation, explanationLayout.textLayoutBlocks);
+                }
                 updateAnimatedEmojis();
             } else {
                 radialProgress.onDetachedFromWindow();
@@ -6684,6 +6724,11 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
                 AnimatedEmojiSpan.release(this, animatedEmojiDescriptionStack);
                 AnimatedEmojiSpan.release(this, animatedEmojiReplyStack);
                 AnimatedEmojiSpan.release(this, animatedEmojiStack);
+                // The poll stacks were the one pair never released here, and their holders sit in
+                // drawables that the static globalEmojiCache keeps alive - the attach branch above
+                // re-registers both when the cell comes back.
+                AnimatedEmojiSpan.release(this, animatedEmojiPollQuestion);
+                AnimatedEmojiSpan.release(this, animatedEmojiPollExplanation);
             }
         }
 
