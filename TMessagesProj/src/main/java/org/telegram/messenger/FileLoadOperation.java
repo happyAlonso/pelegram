@@ -18,6 +18,8 @@ import org.telegram.tgnet.tl.TL_stories;
 import org.telegram.ui.LaunchActivity;
 import org.telegram.ui.Storage.CacheModel;
 
+import org.telegram.messenger.vpn.VpnController;
+
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.RandomAccessFile;
@@ -1674,6 +1676,8 @@ public class FileLoadOperation {
                     if (BuildVars.LOGS_ENABLED) {
                         FileLog.d("finished downloading file to " + cacheFileFinal + " time = " + (System.currentTimeMillis() - startTime) + " dc = " + datacenterId + " size = " + AndroidUtilities.formatFileSize(totalBytesCount));
                     }
+                    // A file that arrived proves the tunnel still carries downloads.
+                    VpnController.onMediaDownloadFinished();
                     if (increment) {
                         if (currentType == ConnectionsManager.FileTypeAudio) {
                             StatsController.getInstance(currentAccount).incrementReceivedItemsCount(ApplicationLoader.getCurrentNetworkType(), StatsController.TYPE_AUDIOS, 1);
@@ -2090,6 +2094,14 @@ public class FileLoadOperation {
                     onFail(false, 0);
                 }
             } else if (error.text.contains("RETRY_LIMIT")) {
+                // Ten chunk requests went into one session and every one was answered by silence.
+                // The loader restarts this operation straight away, so without intervening here the
+                // eleventh request goes into the same session and the file never loads - and because
+                // a queue only runs a few operations at once, the ones behind it never start either.
+                // Give the datacenter's download connections new sessions first: that is what the
+                // user is doing by hand when they turn the VPN off and on to make media work.
+                ConnectionsManager.getInstance(currentAccount).resetDownloadSessions(datacenterId);
+                VpnController.onMediaDownloadStalled();
                 onFail(false, 2);
             } else {
                 if (BuildVars.LOGS_ENABLED) {

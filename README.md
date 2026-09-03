@@ -137,14 +137,25 @@ the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg
   `MemoryGuard`'s caps stay: the slow-tunnel pileup they were built for is real regardless, and the
   freeze-then-restart the leak produced (GC storms once the heap ceiling is near) is exactly what the
   reporter felt as a chat that would not open.
-- **The tunnel MTU is too large for some links.** The same log carries 853 `sendmsg: message too
-  long` from the AmneziaWG socket, 776 of them inside one hour. That is `EMSGSIZE`: the encapsulated
-  packet is bigger than the path underneath it will take, so it is dropped before it leaves the phone.
-  Earlier this was dismissed as harmless, on the strength of a burst of 33-40 seen only at the first
-  connect; at 776 an hour, on one network and not on others, it is a real mismatch rather than a
-  startup artifact. `SingBoxConfigBuilder` defaults the MTU to 1280 only when the key omits it, and an
-  AmneziaVPN `vpn://` key carries its own value in `last_config`, which wins. The fix is probably to
-  cap what a key may ask for, or to discover the path MTU instead of trusting the key.
+- **The tunnel MTU is too large for some links.** *Fixed in 1.3.3.* An earlier log carried 853
+  `sendmsg: message too long` from the AmneziaWG socket, 776 of them inside one hour: `EMSGSIZE`, the
+  encapsulated packet bigger than the path underneath it, dropped before it left the phone. The
+  other direction was measured on the VPN server on 2026-09-03 against a live client whose media had
+  stopped loading. Pinged through the tunnel, packets of 1268 bytes and below arrived, packets of
+  1288, 1300, 1328 and 1420 bytes were lost 10 times out of 10, and packets above the server's own
+  1420-byte tunnel MTU arrived again, because the kernel fragments those into smaller pieces. So
+  that path silently drops any single packet between roughly 1280 and 1420 bytes; two other clients
+  on the same server were clean, which is why the fault followed one user and one network. At the
+  usual tunnel MTU of 1280 every full-size TCP segment is exactly 1280 bytes and lands in that hole,
+  so messages (small packets) keep flowing while a media download receives nothing, times out, and
+  is retried into the same hole. Android's kernel would probe its way below a black hole like this;
+  the userspace TCP stack inside the tunnel does not, which is why a system-wide VPN worked when the
+  app tunnel did not. `SingBoxConfigBuilder` now caps the wireguard/AmneziaWG MTU at 1200 whatever
+  the key asks for (an AmneziaVPN `vpn://` key carries 1280 in `last_config`), which keeps every
+  packet below the measured cliff at a cost of about 6% more packets per megabyte. The server side
+  is the other half: its tunnel interface runs at MTU 1420 with no TCP MSS clamping, so clients of
+  the official Amnezia app on the same network hit the same hole. Lowering that MTU or clamping MSS
+  there is an operator change, not an app change.
 - **Media that never loads while messages keep flowing.** *Fixed in 1.3.3.* A user log from
   2026-09-02 caught it: a 6.3 MB video from DC2 had its eight chunk requests re-sent until tgnet's
   `RETRY_LIMIT` (ten reconnects without a byte back) while requests on the generic connection answered
@@ -167,6 +178,24 @@ the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg
   IPv6 dial fails in milliseconds instead of holding a connection for 12 s ten times over. Which
   address was dead stays unproven: the native tgnet log is off in release builds, and the VPN server's
   own route to that media address is the other candidate, which the rotation now covers as well.
+- **A download that gives up takes its queue slot with it.** *Fixed in 1.3.3.* When tgnet exhausts
+  its retries on a chunk request it returns `RETRY_LIMIT`, and the file loader restarts the same
+  operation at once, against the same datacenter session that has already swallowed ten requests.
+  Nothing about that session has changed, so the eleventh request is answered by the same silence,
+  and the operation loops. A queue runs only a few operations at a time (fewer while the tunnel is
+  up, see `MemoryGuard`), so two or three of these at the head of a queue stop every other download
+  behind them: a user log caught a chat opening with five photos, all of them parked at queue
+  positions 4 and above, no chunk request sent in seventy seconds. The loop is what makes a
+  transient network fault look permanent, and it is why turning the VPN off and on cures it - that
+  suspends every connection and starts fresh sessions. `RETRY_LIMIT` now does the same thing for the
+  one datacenter that gave up (`ConnectionsManager.resetDownloadSessions`), leaving the generic
+  connection carrying messages untouched.
+- **Auto-switch cannot see a server whose downloads are dead.** *Fixed in 1.3.3.* The health check
+  measures a proxy connection and messages travel on the generic connection, so a server that
+  answers both while dropping every file chunk is healthy by every measure the app had. That is the
+  "media doesn't load but chats work" report exactly, and auto-switch sat it out. Downloads giving
+  up now count towards a switch the way failed pings do: three within five minutes with the tunnel
+  connected rolls over to the next server, and any file that finishes clears the count.
 - **The stories preloader re-runs constantly.** 11104 of 12498 file-load operations in that log were
   stories, covering 4803 distinct files; one 14.5 MB video was queued 214 times. The repeats are cheap
   because the file is already cached, so each one finishes in about 3 ms and sends nothing over the

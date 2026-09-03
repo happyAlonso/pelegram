@@ -26,7 +26,12 @@ public:
 
 private:
     FILE *logFile = nullptr;
+    // Kept so the log can be restarted in place when it hits its ceiling: there is one file and no
+    // rotation, and the interesting part of a stalled session is always the newest part.
+    std::string logPath;
+    int64_t writtenBytes = 0;
     pthread_mutex_t mutex;
+    void onWritten(int bytes);
 };
 
 extern bool LOGS_ENABLED;

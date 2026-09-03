@@ -36,6 +36,25 @@ public class SingBoxConfigBuilder {
      */
     private static final String TUNNEL_CONNECT_TIMEOUT = "10s";
 
+    /**
+     * Ceiling on the wireguard/AmneziaWG tunnel MTU, whatever the key asks for.
+     *
+     * Measured on the finn server on 2026-09-03 against a live client whose media had stopped
+     * loading: packets of 1268 bytes and below arrived, packets of 1288, 1300, 1328 and 1420 bytes
+     * were lost 10 times out of 10, and packets above the server's own 1420-byte tunnel MTU
+     * arrived again because the kernel fragments those into smaller pieces. So that path silently
+     * drops any single packet between roughly 1280 and 1420 bytes. Two other clients on the same
+     * server were clean, which is why this looks like "broken on one network only".
+     *
+     * At the usual MTU of 1280 every full-size TCP segment is exactly 1280 bytes and lands in that
+     * hole, so message traffic (small packets) keeps working while media downloads receive nothing
+     * at all. The kernel would eventually probe its way around a black hole like this; the tunnel's
+     * userspace TCP stack does not, so the connection just stalls until it times out. Capping the
+     * MTU here moves every full-size packet safely below the hole. It costs about 6% more packets
+     * per megabyte, which is worth far less than a download that never finishes.
+     */
+    private static final int MAX_TUNNEL_MTU = 1200;
+
     public static final String TAG_PROXY = "proxy-out";
     public static final String TAG_SOCKS_IN = "socks-in";
 
@@ -104,6 +123,12 @@ public class SingBoxConfigBuilder {
         root.put("inbounds", new JSONArray().put(socksIn));
         // wireguard (incl. AmneziaWG) is an `endpoint`, not an `outbound`, in current sing-box.
         if ("wireguard".equals(outbound.optString("type"))) {
+            // Applied here rather than in the parsers so it covers every key format: awg-quick
+            // text, an AmneziaVPN vpn:// blob (which carries its own mtu) and a pasted outbound.
+            int mtu = outbound.optInt("mtu", MAX_TUNNEL_MTU);
+            if (mtu <= 0 || mtu > MAX_TUNNEL_MTU) {
+                outbound.put("mtu", MAX_TUNNEL_MTU);
+            }
             // Bound how long a TCP connect through the tunnel may hang. The wireguard endpoint dials
             // inside its own userspace network stack, which takes its deadline from the caller, and no
             // caller sets one - so an address the VPN server cannot reach is retried by that stack's
@@ -673,11 +698,12 @@ public class SingBoxConfigBuilder {
             }
             peer.put("allowed_ips", filtered);
         }
-        // AmneziaWG uses MTU 1280 by default. The awg-quick text (e.g. from an Amnezia "for other
-        // apps" QR) usually omits it; without it sing-box uses a larger MTU and traffic stalls
-        // ("Connecting" forever). vpn:// keys carry the real MTU in last_config and override this.
+        // The awg-quick text (e.g. from an Amnezia "for other apps" QR) usually omits the MTU;
+        // without one sing-box picks a larger value and traffic stalls ("Connecting" forever).
+        // A vpn:// key carries its own MTU in last_config and overrides this, and build() caps
+        // whatever we end up with at MAX_TUNNEL_MTU.
         if (!o.has("mtu")) {
-            o.put("mtu", 1280);
+            o.put("mtu", MAX_TUNNEL_MTU);
         }
         // Same story as MTU: the awg-quick text routinely omits PersistentKeepalive, and without it
         // wireguard sends nothing while idle, so the NAT mapping in front of the phone expires after

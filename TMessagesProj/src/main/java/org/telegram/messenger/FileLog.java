@@ -359,12 +359,14 @@ public class FileLog {
     }
 
     public static String getNetworkLogPath() {
-        // The native tgnet network log is extremely verbose (per-connection debug: every connect,
-        // disconnect, salt, ping - it hit 77 MB overnight) and is written by native code we cannot
-        // rotate from Java. It is a deep diagnostic, not something a user who just left "Enable Logs"
-        // on needs, so keep it to private-debug builds only. The app-level log (this.currentFile)
-        // stays available under LOGS_ENABLED and carries the useful lines.
-        if (!BuildVars.LOGS_ENABLED || !BuildVars.DEBUG_PRIVATE_VERSION) {
+        // The native tgnet network log records what the app-level log cannot: the address of every
+        // dial, every salt change, session creation and time correction. That is the only place a
+        // media download which is answered by silence can be told apart from one whose datacenter
+        // never answered at all, so it follows "Enable Logs" rather than private builds. It used to
+        // be kept out because native code writes it with no rotation and it reached 77 MB overnight;
+        // the writer now restarts the file at 24 MB, keeping the newest window, so a report stays
+        // small enough to send and the phone cannot fill up.
+        if (!BuildVars.LOGS_ENABLED) {
             return "";
         }
         try {

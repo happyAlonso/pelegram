@@ -128,6 +128,22 @@ public class VpnController implements SingBoxManager.StateListener {
      */
     private int backgroundPingsWithoutTraffic;
 
+    /**
+     * Media downloads that gave up (tgnet's RETRY_LIMIT) since the last file that arrived.
+     *
+     * The health-check ping only exercises a proxy connection, and messages travel on the generic
+     * connection, so a server whose download connections are answered by silence looks perfectly
+     * healthy to both. That is the state users report as "media doesn't load until I reconnect the
+     * VPN": the ping passes, messages arrive, photos never do, and auto-switch never fires because
+     * nothing it measures is broken. Downloads giving up is the missing evidence, so it counts
+     * towards a switch the way failed pings do.
+     */
+    private static final int MEDIA_STALLS_BEFORE_SWITCH = 3;
+    /** Stalls further apart than this are separate incidents, not one server that stopped working. */
+    private static final long MEDIA_STALL_WINDOW_MS = 5 * 60 * 1000L;
+    private static volatile int mediaStallsSinceProgress;
+    private static volatile long lastMediaStallElapsed;
+
     private final ArrayList<Listener> listeners = new ArrayList<>();
     private final Runnable autoSwitchRunnable = this::switchToNext;
     private final Runnable healthCheckRunnable = this::runHealthCheck;
@@ -500,6 +516,45 @@ public class VpnController implements SingBoxManager.StateListener {
     /** Called by tgnet for every inbound byte, on tgnet's threads. Keep it to the single store. */
     public static void onTgnetBytesReceived() {
         tgnetBytesSinceLastTick = true;
+    }
+
+    /**
+     * A media download gave up after tgnet exhausted its retries against one datacenter. Called from
+     * the file loader on whichever thread the failure arrived on, so it only touches the counters
+     * here and hands the decision to the main thread.
+     */
+    public static void onMediaDownloadStalled() {
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastMediaStallElapsed > MEDIA_STALL_WINDOW_MS) {
+            mediaStallsSinceProgress = 0;
+        }
+        lastMediaStallElapsed = now;
+        final int count = ++mediaStallsSinceProgress;
+        AndroidUtilities.runOnUIThread(() -> getInstance().onMediaStalled(count));
+    }
+
+    /** A file finished downloading, so the tunnel is carrying media after all. */
+    public static void onMediaDownloadFinished() {
+        mediaStallsSinceProgress = 0;
+    }
+
+    private void onMediaStalled(int count) {
+        if (!enabled || currentVpn == null
+                || SingBoxManager.getInstance().getState() != SingBoxManager.STATE_CONNECTED) {
+            return;
+        }
+        if (BuildVars.LOGS_ENABLED) {
+            FileLog.d("VpnController: media download gave up (" + count + "/" + MEDIA_STALLS_BEFORE_SWITCH
+                    + ") while the tunnel is connected");
+        }
+        if (count < MEDIA_STALLS_BEFORE_SWITCH || !autoSwitch || vpnList.size() < 2) {
+            return;
+        }
+        mediaStallsSinceProgress = 0;
+        if (BuildVars.LOGS_ENABLED) {
+            FileLog.d("VpnController: downloads keep giving up while the ping passes - auto-switching to next server");
+        }
+        switchToNext();
     }
 
     /**

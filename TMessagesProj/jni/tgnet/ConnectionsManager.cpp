@@ -3875,6 +3875,40 @@ bool ConnectionsManager::isVpnTunnelActive() {
     return vpnTunnelActive;
 }
 
+/**
+ * Drop this datacenter's download connections and give them new sessions.
+ *
+ * A download that gives up with RETRY_LIMIT has re-sent the same chunk request ten times into one
+ * session and been answered by silence every time; sending it an eleventh time changes nothing, and
+ * the file loader restarts the operation immediately, so the loop is closed and a queue slot stays
+ * occupied for good. A user log caught the whole queue head wedged that way. What does break the
+ * loop, and what a user discovers by hand, is turning the VPN off and on: that suspends every
+ * connection and starts fresh sessions. This is that, for the media datacenter only, so the generic
+ * connection carrying messages is left alone.
+ */
+void ConnectionsManager::resetDownloadSessions(int32_t dcId) {
+    scheduleTask([&, dcId] {
+        Datacenter *datacenter = getDatacenterWithId(dcId);
+        if (datacenter == nullptr) {
+            return;
+        }
+        if (LOGS_ENABLED) DEBUG_D("reset download sessions for dc%d", dcId);
+        for (uint8_t i = 0; i < DOWNLOAD_CONNECTIONS_COUNT; i++) {
+            Connection *connection = datacenter->getDownloadConnection(i, false);
+            if (connection != nullptr) {
+                connection->suspendConnection();
+                connection->recreateSession();
+            }
+        }
+        Connection *mediaConnection = datacenter->getGenericMediaConnection(false, 0);
+        if (mediaConnection != nullptr) {
+            mediaConnection->suspendConnection();
+            mediaConnection->recreateSession();
+        }
+        processRequestQueue(0, 0);
+    });
+}
+
 int64_t ConnectionsManager::checkProxy(std::string address, uint16_t port, std::string username, std::string password, std::string secret, onRequestTimeFunc requestTimeFunc, jobject ptr1) {
     auto proxyCheckInfo = new ProxyCheckInfo();
     proxyCheckInfo->address = address;

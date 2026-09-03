@@ -155,6 +155,15 @@ public class ConnectionsManager extends BaseController {
         }
     }
 
+    /**
+     * Give this datacenter's download connections new sessions, the way turning the VPN off and on
+     * does for every connection. Called when a download gives up with RETRY_LIMIT, because retrying
+     * into the session that has already swallowed ten requests only repeats the same silence.
+     */
+    public void resetDownloadSessions(int dcId) {
+        native_resetDownloadSessions(currentAccount, dcId);
+    }
+
     public void discardConnection(int dcId, int connectionType) {
         Utilities.stageQueue.postRunnable(() -> {
             native_discardConnection(currentAccount, dcId, connectionType);
@@ -995,6 +1004,7 @@ public class ConnectionsManager extends BaseController {
     public static native void native_pauseNetwork(int currentAccount);
     public static native void native_setIpStrategy(int currentAccount, byte value);
     public static native void native_setVpnTunnelActive(int currentAccount, boolean active);
+    public static native void native_resetDownloadSessions(int currentAccount, int datacenterId);
     public static native void native_updateDcSettings(int currentAccount);
     public static native void native_moveDatacenter(int currentAccount, int datacenterId);
     public static native void native_setNetworkAvailable(int currentAccount, boolean value, int networkType, boolean slow);

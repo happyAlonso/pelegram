@@ -285,6 +285,10 @@ void setVpnTunnelActive(JNIEnv *env, jclass c, jint instanceNum, jboolean value)
     ConnectionsManager::getInstance(instanceNum).setVpnTunnelActive(value);
 }
 
+void resetDownloadSessions(JNIEnv *env, jclass c, jint instanceNum, jint datacenterId) {
+    ConnectionsManager::getInstance(instanceNum).resetDownloadSessions(datacenterId);
+}
+
 void setNetworkAvailable(JNIEnv *env, jclass c, jint instanceNum, jboolean value, jint networkType, jboolean slow) {
     ConnectionsManager::getInstance(instanceNum).setNetworkAvailable(value, networkType, slow);
 }
@@ -554,6 +558,7 @@ static JNINativeMethod ConnectionsManagerMethods[] = {
         {"native_moveDatacenter", "(II)V", (void *) moveDatacenter},
         {"native_setIpStrategy", "(IB)V", (void *) setIpStrategy},
         {"native_setVpnTunnelActive", "(IZ)V", (void *) setVpnTunnelActive},
+        {"native_resetDownloadSessions", "(II)V", (void *) resetDownloadSessions},
         {"native_setNetworkAvailable", "(IZIZ)V", (void *) setNetworkAvailable},
         {"native_setPushConnectionEnabled", "(IZ)V", (void *) setPushConnectionEnabled},
         {"native_setJava", "(Z)V", (void *) setJava},
