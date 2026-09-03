@@ -67,6 +67,7 @@ public:
     void pauseNetwork();
     void setNetworkAvailable(bool value, int32_t type, bool slow);
     void setIpStrategy(uint8_t value);
+    void setVpnTunnelActive(bool value);
     void init(uint32_t version, int32_t layer, int32_t apiId, std::string deviceModel, std::string systemVersion, std::string appVersion, std::string langCode, std::string systemLangCode, std::string configPath, std::string logPath, std::string regId, std::string cFingerprint, std::string installerId, std::string packageId, int32_t timezoneOffset, int64_t userId, bool userPremium, bool isPaused, bool enablePushConnection, bool hasNetwork, int32_t networkType, int32_t performanceClass);
     void setProxySettings(std::string address, uint16_t port, std::string username, std::string password, std::string secret);
     void setLangCode(std::string langCode);
@@ -132,6 +133,7 @@ private:
     int64_t generateMessageId();
     uint8_t getIpStratagy();
     bool isNetworkAvailable();
+    bool isVpnTunnelActive();
 
     void scheduleCheckProxyInternal(ProxyCheckInfo *proxyCheckInfo);
     void checkProxyInternal(ProxyCheckInfo *proxyCheckInfo);
@@ -207,6 +209,10 @@ private:
     uint8_t ipStrategy = USE_IPV4_ONLY;
     bool lastProtocolIsIpv6 = false;
     bool lastProtocolUsefullData = false;
+    // True while the proxy is the app's own VPN tunnel (sing-box on 127.0.0.1). Then the strategy
+    // Java pushed is final and datacenter addresses rotate like they do without a proxy - see
+    // Connection::connect / onDisconnectedInternal and Datacenter::nextAddressOrPort.
+    bool vpnTunnelActive = false;
     std::vector<ConnectionSocket *> activeConnections;
     std::vector<ConnectionSocket *> activeConnectionsCopy;
     int epolFd;

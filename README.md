@@ -145,12 +145,28 @@ the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg
   startup artifact. `SingBoxConfigBuilder` defaults the MTU to 1280 only when the key omits it, and an
   AmneziaVPN `vpn://` key carries its own value in `last_config`, which wins. The fix is probably to
   cap what a key may ask for, or to discover the path MTU instead of trusting the key.
-- **Some connections still go to IPv6 datacenters the tunnel cannot carry.** `getIpStrategy()` returns
-  `USE_IPV4_ONLY` whenever the VPN is on, and the log confirms the strategy reached the core
-  ("selected ip strategy 0"), yet 257 dials went to `2001:67c:4e8:f002::a` and died inside the tunnel
-  with "missing IPv6 local address". Something picks an address without consulting the strategy, so
-  the v1.1.7 fix is incomplete. Each failure is small on its own; together they are a steady trickle of
-  dials that cannot succeed.
+- **Media that never loads while messages keep flowing.** *Fixed in 1.3.3.* A user log from
+  2026-09-02 caught it: a 6.3 MB video from DC2 had its eight chunk requests re-sent until tgnet's
+  `RETRY_LIMIT` (ten reconnects without a byte back) while requests on the generic connection answered
+  in 80 ms and the proxy ping was 92 ms. Switching servers did not help; killing the app did, and so
+  did a system-wide VPN, which users had found on their own. Two things in tgnet turned one unreachable
+  media address into a download that never finished. With any proxy configured, `Connection::connect`
+  marks every dial static, and `Datacenter::getCurrentAddress` then returns the same address each time
+  no matter how the rotation counters move, so an address the VPN server cannot reach is dialed again
+  after every 12 s timeout, only the port changing. That is right for an MTProto proxy, which picks
+  the endpoint itself; through the app tunnel the server dials exactly what it is handed. And after
+  one full pass over a datacenter's list, `Connection::onDisconnectedInternal` widens the strategy from
+  `USE_IPV4_ONLY` to `USE_IPV4_IPV6_RANDOM` by itself; the family it then picks is kept while any
+  connection receives data, and Java re-pushes IPv4-only only on a network or proxy change, which is
+  exactly what reconnecting the VPN does. That is the earlier "connections still go to IPv6
+  datacenters" item (257 dials to `2001:67c:4e8:f002::a` in a 1.1.7 log), now with its line: the pick
+  never consulted `getIpStrategy()`. 1.3.3 tells the core when the app tunnel is the proxy
+  (`ConnectionsManager.setVpnTunnelActive`): the strategy widening is skipped, media connections
+  rotate addresses on failure with one attempt per address instead of four ports each, and the
+  generated sing-box route rejects IPv6 destinations while the tunnel carries only IPv4, so a stray
+  IPv6 dial fails in milliseconds instead of holding a connection for 12 s ten times over. Which
+  address was dead stays unproven: the native tgnet log is off in release builds, and the VPN server's
+  own route to that media address is the other candidate, which the rotation now covers as well.
 - **The stories preloader re-runs constantly.** 11104 of 12498 file-load operations in that log were
   stories, covering 4803 distinct files; one 14.5 MB video was queued 214 times. The repeats are cheap
   because the file is already cached, so each one finishes in about 3 ms and sends nothing over the

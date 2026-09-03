@@ -62,6 +62,18 @@ public class SingBoxConfigBuilder {
         JSONObject route = new JSONObject();
         // Everything from the socks inbound leaves via the proxy outbound/endpoint (by tag).
         route.put("final", TAG_PROXY);
+        // Refuse IPv6 destinations while the tunnel carries only IPv4. tgnet is told to dial IPv4
+        // only (ConnectionsManager.getIpStrategy), but a stray IPv6 dial used to sit silent inside
+        // the tunnel until tgnet's 12s timeout, ten times per media request, because the remote
+        // server had nowhere to send it. A rejected connect comes back in milliseconds and tgnet
+        // moves to the next address. Only a wireguard endpoint with an IPv6 interface address can
+        // carry IPv6 and is left alone. DNS is ipv4_only above, so nothing legitimate asks for it.
+        if (!tunnelCarriesIpv6(outbound)) {
+            JSONObject rejectIpv6 = new JSONObject();
+            rejectIpv6.put("ip_cidr", new JSONArray().put("::/0"));
+            rejectIpv6.put("action", "reject");
+            route.put("rules", new JSONArray().put(rejectIpv6));
+        }
 
         // DNS: the core's Android default resolver points at a dead local :53, so any traffic where the
         // core has to resolve a hostname itself fails ("connection refused ... [::1]:53"). tgnet/calls
@@ -108,6 +120,23 @@ public class SingBoxConfigBuilder {
         }
         root.put("route", route);
         return root.toString();
+    }
+
+    /** True only for a wireguard/AmneziaWG endpoint whose interface has an IPv6 address. */
+    private static boolean tunnelCarriesIpv6(JSONObject outbound) {
+        if (!"wireguard".equals(outbound.optString("type"))) {
+            return false;
+        }
+        JSONArray address = outbound.optJSONArray("address");
+        if (address == null) {
+            return false;
+        }
+        for (int i = 0; i < address.length(); i++) {
+            if (address.optString(i, "").contains(":")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

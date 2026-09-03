@@ -3864,6 +3864,17 @@ void ConnectionsManager::setIpStrategy(uint8_t value) {
     });
 }
 
+void ConnectionsManager::setVpnTunnelActive(bool value) {
+    scheduleTask([&, value] {
+        if (LOGS_ENABLED) DEBUG_D("vpn tunnel active = %d", value ? 1 : 0);
+        vpnTunnelActive = value;
+    });
+}
+
+bool ConnectionsManager::isVpnTunnelActive() {
+    return vpnTunnelActive;
+}
+
 int64_t ConnectionsManager::checkProxy(std::string address, uint16_t port, std::string username, std::string password, std::string secret, onRequestTimeFunc requestTimeFunc, jobject ptr1) {
     auto proxyCheckInfo = new ProxyCheckInfo();
     proxyCheckInfo->address = address;

@@ -404,7 +404,12 @@ void Datacenter::nextAddressOrPort(uint32_t flags) {
     }
 
     bool tryNextPort = true;
-    if ((flags & TcpAddressFlagStatic) == 0 && currentAddressNum < addresses->size()) {
+    if (ConnectionsManager::getInstance(instanceNum).isVpnTunnelActive()) {
+        // Through the app tunnel the VPN server dials the exact ip:port it is handed, and an address
+        // that is silent on 443 is silent on 80 and 5222 too. Port cycling was for firewalls on the
+        // phone's own network; here it costs three more 12s timeouts before the next address.
+        tryNextPort = false;
+    } else if ((flags & TcpAddressFlagStatic) == 0 && currentAddressNum < addresses->size()) {
         TcpAddress *currentAddress = &((*addresses)[currentAddressNum]);
         tryNextPort = (currentAddress->flags & TcpAddressFlagStatic) == 0;
     }

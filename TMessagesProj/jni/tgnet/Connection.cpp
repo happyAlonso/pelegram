@@ -312,7 +312,15 @@ void Connection::connect() {
     } else {
         ipv6 = 0;
     }
-    uint32_t isStatic = connectionType == ConnectionTypeProxy || !ConnectionsManager::getInstance(currentDatacenter->instanceNum).proxyAddress.empty() ? TcpAddressFlagStatic : 0;
+    // With a proxy configured, upstream pins every dial to the datacenter's "static" address:
+    // getCurrentAddress() then ignores the rotation counters, so an address the proxy cannot reach
+    // is re-dialed forever (only the port cycles). That is right for an MTProto proxy, which picks
+    // the endpoint itself, but through the app's own tunnel the VPN server dials exactly the
+    // address it is handed, and a user log (2026-09-02) showed a media download re-sent ten times
+    // to a silent address until RETRY_LIMIT while the generic connection was fine. While the app
+    // tunnel is the proxy, rotate addresses the way a direct connection does.
+    bool appTunnel = ConnectionsManager::getInstance(currentDatacenter->instanceNum).isVpnTunnelActive();
+    uint32_t isStatic = connectionType == ConnectionTypeProxy || (!ConnectionsManager::getInstance(currentDatacenter->instanceNum).proxyAddress.empty() && !appTunnel) ? TcpAddressFlagStatic : 0;
     TcpAddress *tcpAddress = nullptr;
     if (isMediaConnectionType(connectionType)) {
         currentAddressFlags = TcpAddressFlagDownload | isStatic;
@@ -712,7 +720,16 @@ void Connection::onDisconnectedInternal(int32_t reason, int32_t error) {
             isTryingNextPort = true;
             if (failedConnectionCount > willRetryConnectCount || switchToNextPort) {
                 currentDatacenter->nextAddressOrPort(currentAddressFlags);
-                if (currentDatacenter->isRepeatCheckingAddresses() && (ConnectionsManager::getInstance(currentDatacenter->instanceNum).getIpStratagy() == USE_IPV4_ONLY || ConnectionsManager::getInstance(currentDatacenter->instanceNum).getIpStratagy() == USE_IPV6_ONLY)) {
+                // isRepeatCheckingAddresses() clears its flag when read, so read it first and always.
+                bool cycledAllAddresses = currentDatacenter->isRepeatCheckingAddresses();
+                // Upstream widens a failing single-family strategy to IPv4/IPv6 random after one full
+                // pass over the list, on the theory that the other family may work. Through the app
+                // tunnel the strategy is Java's verdict on what the tunnel can carry (IPv4 only), and
+                // the widened pick is sticky (Connection::connect reuses lastProtocolIsIpv6 while any
+                // connection receives data), so one bad pass sent every later media dial to an IPv6
+                // datacenter the tunnel could not reach until the next network change re-pushed the
+                // strategy. Keep Java's choice while the tunnel is active.
+                if (cycledAllAddresses && !ConnectionsManager::getInstance(currentDatacenter->instanceNum).isVpnTunnelActive() && (ConnectionsManager::getInstance(currentDatacenter->instanceNum).getIpStratagy() == USE_IPV4_ONLY || ConnectionsManager::getInstance(currentDatacenter->instanceNum).getIpStratagy() == USE_IPV6_ONLY)) {
                     if (LOGS_ENABLED) DEBUG_D("started retrying connection, set ipv4 ipv6 random strategy");
                     ConnectionsManager::getInstance(currentDatacenter->instanceNum).setIpStrategy(USE_IPV4_IPV6_RANDOM);
                 }

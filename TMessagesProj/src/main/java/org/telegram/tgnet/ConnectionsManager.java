@@ -975,10 +975,26 @@ public class ConnectionsManager extends BaseController {
         }
     }
 
+    /**
+     * Tell the core whether the configured proxy is the app's own VPN tunnel (sing-box on
+     * 127.0.0.1). While it is: the IP strategy pushed from {@link #getIpStrategy()} is final - the
+     * core no longer widens it to IPv4/IPv6 random after a failed pass over a datacenter's
+     * addresses - and datacenter addresses rotate on failure the way they do without a proxy,
+     * instead of being pinned to the "static" one. Both are what a user log showed behind media
+     * that never loaded while messages kept flowing; see Connection.cpp. Called by SingBoxManager
+     * around {@link #setProxySettings}, for every account slot like setProxySettings itself.
+     */
+    public static void setVpnTunnelActive(boolean active) {
+        for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) {
+            native_setVpnTunnelActive(a, active);
+        }
+    }
+
     public static native void native_switchBackend(int currentAccount, boolean restart);
     public static native int native_isTestBackend(int currentAccount);
     public static native void native_pauseNetwork(int currentAccount);
     public static native void native_setIpStrategy(int currentAccount, byte value);
+    public static native void native_setVpnTunnelActive(int currentAccount, boolean active);
     public static native void native_updateDcSettings(int currentAccount);
     public static native void native_moveDatacenter(int currentAccount, int datacenterId);
     public static native void native_setNetworkAvailable(int currentAccount, boolean value, int networkType, boolean slow);

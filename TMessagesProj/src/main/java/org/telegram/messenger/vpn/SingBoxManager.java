@@ -150,7 +150,10 @@ public class SingBoxManager implements CommandServerHandler {
             }
         }
 
-        // Point tgnet at the local SOCKS5. Empty secret/user/pass = plain SOCKS5 path.
+        // Point tgnet at the local SOCKS5. Empty secret/user/pass = plain SOCKS5 path. Flag the
+        // tunnel first: setProxySettings reconnects every datacenter, and those first dials must
+        // already rotate addresses and keep the IPv4-only strategy (see ConnectionsManager).
+        ConnectionsManager.setVpnTunnelActive(true);
         ConnectionsManager.setProxySettings(true, "127.0.0.1", localPort, "", "", "");
         setState(STATE_CONNECTED, null);
     }
@@ -178,6 +181,7 @@ public class SingBoxManager implements CommandServerHandler {
         // Clear the proxy so Telegram goes direct once the tunnel is down.
         try {
             ConnectionsManager.setProxySettings(false, "", 1080, "", "", "");
+            ConnectionsManager.setVpnTunnelActive(false);
         } catch (Throwable ignored) {
         }
     }
