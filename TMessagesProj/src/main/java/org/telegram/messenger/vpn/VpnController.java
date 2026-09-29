@@ -15,6 +15,7 @@ import org.telegram.messenger.MessagesController;
 import org.telegram.messenger.UserConfig;
 import org.telegram.messenger.voip.VoIPService;
 import org.telegram.tgnet.ConnectionsManager;
+import org.telegram.utils.proxy.ProxySettings;
 
 import java.util.ArrayList;
 
@@ -444,7 +445,11 @@ public class VpnController implements SingBoxManager.StateListener {
         info.checking = true;
         lastHealthCheckElapsed = SystemClock.elapsedRealtime();
         int account = UserConfig.selectedAccount;
-        ConnectionsManager.getInstance(account).checkProxy("127.0.0.1", port, "", "", "", time -> AndroidUtilities.runOnUIThread(() -> {
+        ConnectionsManager.getInstance(account).checkProxy(ProxySettings.builder()
+                .setType(ProxySettings.Type.SOCKS5)
+                .setAddress("127.0.0.1")
+                .setPort(port)
+                .build(), time -> AndroidUtilities.runOnUIThread(() -> {
             info.checking = false;
             if (BuildVars.LOGS_ENABLED) {
                 // Why the health check decided what it did. Without this the only symptom is the core

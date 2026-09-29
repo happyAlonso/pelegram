@@ -6,6 +6,7 @@ import org.telegram.messenger.ApplicationLoader;
 import org.telegram.messenger.BuildVars;
 import org.telegram.messenger.FileLog;
 import org.telegram.tgnet.ConnectionsManager;
+import org.telegram.utils.proxy.ProxySettings;
 
 import java.io.File;
 import java.util.ArrayList;
@@ -21,7 +22,7 @@ import libbox.SystemProxyStatus;
  * Runs the embedded sing-box core in app-scoped SOCKS mode and points tgnet's proxy at it.
  *
  * Flow: build a config exposing a local SOCKS5 on 127.0.0.1:localPort -> start the core ->
- * ConnectionsManager.setProxySettings(true, "127.0.0.1", localPort, "", "", ""). On stop, close
+ * ConnectionsManager.setProxySettings(true, <SOCKS5 127.0.0.1:localPort>). On stop, close
  * the core and clear the proxy. tgnet already speaks SOCKS5, so no native changes are involved.
  *
  * This is the integration scaffold - lifecycle + wiring are complete; on-device tuning (config
@@ -154,7 +155,11 @@ public class SingBoxManager implements CommandServerHandler {
         // tunnel first: setProxySettings reconnects every datacenter, and those first dials must
         // already rotate addresses and keep the IPv4-only strategy (see ConnectionsManager).
         ConnectionsManager.setVpnTunnelActive(true);
-        ConnectionsManager.setProxySettings(true, "127.0.0.1", localPort, "", "", "");
+        ConnectionsManager.setProxySettings(true, ProxySettings.builder()
+                .setType(ProxySettings.Type.SOCKS5)
+                .setAddress("127.0.0.1")
+                .setPort(localPort)
+                .build());
         setState(STATE_CONNECTED, null);
     }
 
@@ -180,7 +185,7 @@ public class SingBoxManager implements CommandServerHandler {
         }
         // Clear the proxy so Telegram goes direct once the tunnel is down.
         try {
-            ConnectionsManager.setProxySettings(false, "", 1080, "", "", "");
+            ConnectionsManager.setProxySettings(false, null);
             ConnectionsManager.setVpnTunnelActive(false);
         } catch (Throwable ignored) {
         }

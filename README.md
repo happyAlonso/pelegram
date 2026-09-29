@@ -65,7 +65,7 @@ the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg
 
 ## Status
 
-- Based on official Telegram **12.10.1** (TL layer 229), kept current with periodic rebases onto upstream.
+- Based on official Telegram **12.10.5** (TL layer 229), kept current with periodic rebases onto upstream.
 - Embedded sing-box core, key parsing, the key management UI, and connect/disconnect wiring are
   integrated and shipping.
 - Calls, the in-app browser, auto-switch between keys, reconnect throttling, background push, and
@@ -209,12 +209,15 @@ Requirements: Android SDK (compile SDK 36), NDK `27.2.12479018`, JDK 17, and Go 
 tunnel core). See `VPN_FEATURE_PLAN.md` for the full design and integration notes.
 
 1. **Fetch the submodules.** Upstream keeps ffmpeg, dav1d, libvpx, libyuv, openh264, ogg/opus/opusfile,
-   tlottie and jlatexmath as git submodules:
+   boringssl, abseil, tdlib, wamr, tlottie, jlatexmath and the androidx media3 player module
+   (`TMessagesProj_Modules/media`) as git submodules:
    ```
    git submodule update --init --recursive --depth=1
    ```
-   The prebuilt static libraries under `TMessagesProj/jni/ffmpeg/<abi>` are committed, so the
-   submodules are only needed for `:jlatexmath`, `tlottie`, and for rebuilding those libraries.
+   The prebuilt static libraries under `TMessagesProj/jni/prebuild/lib/<abi>` are committed, so most
+   submodules only supply headers. Three are compiled: `TMessagesProj_Modules/media` (Gradle includes
+   it from `settings.gradle`), `abseil` and `jlatexmath`. The rest, `wamr` included, are read for
+   headers, so none can be skipped.
 2. **Provide your own api_id / api_hash.** pelegram reads them at build time from a gitignored
    `secrets/` directory at the repo root so they never land in source control:
    ```
