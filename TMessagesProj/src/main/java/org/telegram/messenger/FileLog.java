@@ -66,8 +66,11 @@ public class FileLog {
     // resident), so pruning only at startup is not enough: the current file is rotated in place
     // once it outgrows MAX_LOG_FILE_SIZE, and the whole logs dir is kept under a total size and
     // age cap. Without this, logs grew unbounded (>80 MB in a few days with logging enabled).
+    // The total was 32 MB until 1.4.1. A phone with seven VPN keys and several accounts writes about
+    // 28 MB of Java log a day, so a slowdown reported after 100+ hours of uptime arrived with nothing
+    // older than the restart that followed it. 96 MB holds about three days, the same as the age cap.
     private final static long MAX_LOG_FILE_SIZE = 8 * 1024 * 1024;
-    private final static long MAX_LOGS_TOTAL_SIZE = 32 * 1024 * 1024;
+    private final static long MAX_LOGS_TOTAL_SIZE = 96 * 1024 * 1024;
     private final static long MAX_LOGS_AGE = 3 * 24 * 60 * 60 * 1000L;
     private final static int ROTATE_CHECK_EVERY = 500;
     private int linesSinceRotateCheck; // only touched on logQueue

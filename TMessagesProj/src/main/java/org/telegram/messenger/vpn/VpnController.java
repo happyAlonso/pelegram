@@ -103,10 +103,50 @@ public class VpnController implements SingBoxManager.StateListener {
      * reaches {@link #PING_FAILURES_BEFORE_SWITCH} - a single failure used to roll the server over, and
      * because every switch restarts the core, the replacement's first ping then failed too (it had not
      * handshaked yet) and switched again, so one hiccup cost several restarts. Any successful ping
-     * clears it; it also resets whenever we move to a different server or (re)connect.
+     * clears it; it also resets whenever we move to a different server or (re)connect, and whenever a
+     * health-check tick sees tgnet traffic. Without that last reset the count was not consecutive at
+     * all: a 7 October log switched away at 07:02 on failures from 03:08, 06:51 and 07:02, although
+     * the tunnel had carried traffic for the four hours between the first two.
      */
     private int consecutivePingFailures;
     private static final int PING_FAILURES_BEFORE_SWITCH = 3;
+
+    /**
+     * How long a server that auto-switch gave up on stays out of the rotation. {@link #switchToNext()}
+     * used to take the next index blindly, so a list holding dead keys walked into each of them in
+     * turn: in a 7 October log three of seven servers never answered, and one night the app spent 46
+     * minutes on two of them while a working server sat further down the list. A server that failed
+     * within this window is skipped unless every other server has failed within it too.
+     */
+    private static final long FAILED_SERVER_SKIP_MS = 30 * 60 * 1000L;
+
+    /**
+     * Trial pings for a server auto-switch has just moved to, each delay counted from the previous
+     * result. In the background the regular health check needs two silent ticks and then three failed
+     * pings spaced by the outage backoff before it gives up, about 22 minutes per dead server in that
+     * log. A switch is already evidence that something is wrong, so the new server gets a short trial
+     * instead: if all of these fail (about a minute in all) we move on, and the first answer, the
+     * connect-time ping included, ends the trial.
+     */
+    private static final long[] TRIAL_PING_DELAYS_MS = {5 * 1000L, 10 * 1000L, 15 * 1000L};
+    /** Next index into {@link #TRIAL_PING_DELAYS_MS} while a trial runs, -1 otherwise. */
+    private int trialStep = -1;
+    /** Bumped whenever a trial starts or stops, so a late ping result cannot act on a newer trial. */
+    private int trialGeneration;
+    /** Set by {@link #switchToNext()} when the server it picked should get a trial once the core is up. */
+    private boolean trialAfterConnect;
+    /**
+     * elapsedRealtime of the last proof that the tunnel worked: a successful ping, or tgnet traffic seen
+     * by a health-check tick. A switch runs a trial only if this is recent. When nothing has worked for
+     * {@link #FAILED_SERVER_SKIP_MS} - every server unreachable, a long outage - switches fall back to
+     * the slow backoff instead of cycling the whole list once a minute.
+     */
+    private long lastTunnelWorkedElapsed;
+
+    private static final int PING_CONNECT = 0; // right after the core connects, never switches
+    private static final int PING_HEALTH = 1;  // health-check tick, counts towards a switch
+    private static final int PING_TRIAL = 2;   // trial of a server auto-switch just moved to
+    private static final String[] PING_PURPOSE_NAMES = {"connect", "health", "trial"};
 
     /**
      * Set by tgnet, on tgnet's own threads, whenever any bytes arrive from Telegram; cleared by each
@@ -123,9 +163,12 @@ public class VpnController implements SingBoxManager.StateListener {
     private int silentBackgroundTicks;
     /**
      * Background pings spent since traffic last flowed. Indexes {@link #BACKGROUND_PING_INTERVALS_MS},
-     * so it is also the backoff level. Deliberately survives {@link #switchToNext()}: if a long outage
+     * so it is also the backoff level. It survives a {@link #switchToNext()} that lands on a server
+     * which already failed recently, or one made when nothing has worked for a while: if a long outage
      * makes every server look dead, the backoff has to keep growing across switches, or we would cycle
-     * the whole list every couple of minutes and restart the core each time.
+     * the whole list every couple of minutes and restart the core each time. A switch to a fresh server
+     * while the tunnel worked recently resets it, because the backoff measured the old server, and the
+     * new one gets a trial instead (see {@link #TRIAL_PING_DELAYS_MS}).
      */
     private int backgroundPingsWithoutTraffic;
 
@@ -148,6 +191,7 @@ public class VpnController implements SingBoxManager.StateListener {
     private final ArrayList<Listener> listeners = new ArrayList<>();
     private final Runnable autoSwitchRunnable = this::switchToNext;
     private final Runnable healthCheckRunnable = this::runHealthCheck;
+    private final Runnable trialRunnable = this::runTrialPing;
 
     private VpnController() {
         SingBoxManager.getInstance().addListener(this);
@@ -328,6 +372,7 @@ public class VpnController implements SingBoxManager.StateListener {
         consecutivePingFailures = 0; // user picked a different server - clean slate
         silentBackgroundTicks = 0;
         backgroundPingsWithoutTraffic = 0; // deliberate user action, so drop the outage backoff too
+        trialAfterConnect = false;
         save();
         notifyList();
         if (enabled) {
@@ -340,6 +385,7 @@ public class VpnController implements SingBoxManager.StateListener {
         save();
         silentBackgroundTicks = 0;
         backgroundPingsWithoutTraffic = 0;
+        trialAfterConnect = false;
         if (enabled && currentVpn != null) {
             reconnect();
         } else {
@@ -351,6 +397,7 @@ public class VpnController implements SingBoxManager.StateListener {
 
     private void reconnect() {
         AndroidUtilities.cancelRunOnUIThread(autoSwitchRunnable);
+        stopTrial();
         if (currentVpn != null && !TextUtils.isEmpty(currentVpn.key)) {
             SingBoxManager.getInstance().connect(currentVpn.key);
         }
@@ -398,7 +445,11 @@ public class VpnController implements SingBoxManager.StateListener {
                 consecutivePingFailures = 0; // fresh core session - don't carry failures across it
                 silentBackgroundTicks = 0;
                 tgnetBytesSinceLastTick = false; // whatever arrived went through the previous tunnel
-                measurePing();
+                measurePing(PING_CONNECT);
+                if (trialAfterConnect) {
+                    trialAfterConnect = false;
+                    startTrial();
+                }
                 // Keep re-checking reachability on the chosen interval so a server that dies mid-session
                 // (not just at connect) triggers auto-switch.
                 scheduleHealthCheck();
@@ -406,6 +457,7 @@ public class VpnController implements SingBoxManager.StateListener {
                 WebViewProxyController.apply(SingBoxManager.getInstance().getLocalPort());
             } else {
                 AndroidUtilities.cancelRunOnUIThread(healthCheckRunnable);
+                stopTrial();
                 WebViewProxyController.clear();
                 if (state == SingBoxManager.STATE_ERROR && enabled && autoSwitch && vpnList.size() > 1) {
                     AndroidUtilities.cancelRunOnUIThread(autoSwitchRunnable);
@@ -418,26 +470,23 @@ public class VpnController implements SingBoxManager.StateListener {
         });
     }
 
-    private void measurePing() {
-        measurePing(false);
-    }
-
     /**
-     * Ping the current connection through the local proxy to show its latency/availability. When
-     * {@code allowAutoSwitch} is set (the health-check tick only) a failure counts towards rolling
-     * over to the next connection.
+     * Ping the current connection through the local proxy to show its latency/availability. A failed
+     * {@link #PING_HEALTH} ping counts towards rolling over to the next connection, and a failed
+     * {@link #PING_TRIAL} ping advances the trial of a server auto-switch has just moved to.
      *
      * We deliberately do NOT auto-switch on the connect-time ping: the core reports "connected" the
      * instant it starts, before the server has finished its handshake, so an immediate ping usually
      * fails - and since every switch tears the proxy down and starts a new one, switching on it would
      * tight-loop through every connection without any of them getting a chance to come up (exactly the
-     * runaway the user hit). Only the health-check tick switches, and it never fires straight after
-     * connecting: in the foreground it waits a full interval, in the background it first needs
-     * {@link #BACKGROUND_SILENT_TICKS_BEFORE_PING} ticks of total silence, either of which is long
-     * enough for a live server to have come up.
+     * runaway the user hit). Only the health-check tick and a trial switch, and neither fires straight
+     * after connecting: in the foreground the tick waits a full interval, in the background it first
+     * needs {@link #BACKGROUND_SILENT_TICKS_BEFORE_PING} ticks of total silence, and a trial starts
+     * {@link #TRIAL_PING_DELAYS_MS} after the connect, all long enough for a live server to come up.
      */
-    private void measurePing(boolean allowAutoSwitch) {
+    private void measurePing(int purpose) {
         final VpnKeyInfo info = currentVpn;
+        final int generation = trialGeneration;
         int port = SingBoxManager.getInstance().getLocalPort();
         if (info == null || port <= 0) {
             return;
@@ -456,18 +505,26 @@ public class VpnController implements SingBoxManager.StateListener {
                 // silently restarting every N seconds, which is impossible to attribute from a log.
                 FileLog.d("VpnController: ping " + info.getType() + " '" + info.name + "' -> "
                         + (time == -1 ? "FAILED" : time + "ms")
-                        + " (healthCheck=" + allowAutoSwitch + ", autoSwitch=" + autoSwitch
+                        + " (" + PING_PURPOSE_NAMES[purpose] + ", autoSwitch=" + autoSwitch
                         + ", state=" + SingBoxManager.getInstance().getState()
                         + ", servers=" + vpnList.size() + ", fg=" + isInForeground() + ")");
             }
             if (time == -1) {
                 info.available = false;
                 info.ping = 0;
-                // Only the periodic health check switches, and only if we're still connected to the same
-                // server it just tested (guards against switching during a transition). The connect-time
-                // ping is expected to fail before the handshake completes, so it must not count.
-                if (allowAutoSwitch && enabled && autoSwitch && info == currentVpn && vpnList.size() > 1
-                        && SingBoxManager.getInstance().getState() == SingBoxManager.STATE_CONNECTED) {
+                // Only the periodic health check and a trial switch, and only if we're still connected to
+                // the same server they just tested (guards against switching during a transition). The
+                // connect-time ping is expected to fail before the handshake completes, so it must not count.
+                boolean canSwitch = enabled && autoSwitch && info == currentVpn && vpnList.size() > 1
+                        && SingBoxManager.getInstance().getState() == SingBoxManager.STATE_CONNECTED;
+                boolean trialPing = purpose == PING_TRIAL && generation == trialGeneration && trialStep >= 0;
+                if (trialPing) {
+                    if (canSwitch) {
+                        onTrialPingFailed();
+                    } else {
+                        stopTrial();
+                    }
+                } else if (purpose == PING_HEALTH && canSwitch) {
                     consecutivePingFailures++;
                     if (consecutivePingFailures >= PING_FAILURES_BEFORE_SWITCH) {
                         if (BuildVars.LOGS_ENABLED) {
@@ -483,7 +540,15 @@ public class VpnController implements SingBoxManager.StateListener {
             } else {
                 info.available = true;
                 info.ping = time;
+                info.lastFailedElapsed = 0;
+                lastTunnelWorkedElapsed = SystemClock.elapsedRealtime();
                 consecutivePingFailures = 0;
+                if (info == currentVpn && trialStep >= 0) {
+                    if (BuildVars.LOGS_ENABLED) {
+                        FileLog.d("VpnController: '" + info.getDisplayName() + "' answered - trial over, staying");
+                    }
+                    stopTrial();
+                }
             }
             notifyList();
         }));
@@ -603,11 +668,14 @@ public class VpnController implements SingBoxManager.StateListener {
                 // backoff behind them when they close it again.
                 silentBackgroundTicks = 0;
                 backgroundPingsWithoutTraffic = 0;
+                // Failures before this traffic were blips, not a dead server, see consecutivePingFailures.
+                consecutivePingFailures = 0;
+                lastTunnelWorkedElapsed = SystemClock.elapsedRealtime();
             }
             if (isInForeground()) {
                 // The user is looking at the list, so the ping is paying for the latency they see as
                 // well as for auto-switch. Keep their chosen cadence.
-                measurePing(true);
+                measurePing(PING_HEALTH);
             } else if (!trafficFlowed
                     && ++silentBackgroundTicks >= BACKGROUND_SILENT_TICKS_BEFORE_PING
                     && SystemClock.elapsedRealtime() - lastHealthCheckElapsed >= backgroundPingIntervalMs()) {
@@ -618,7 +686,7 @@ public class VpnController implements SingBoxManager.StateListener {
                                 + backgroundPingsWithoutTraffic + ")");
                     }
                     backgroundPingsWithoutTraffic++;
-                    measurePing(true);
+                    measurePing(PING_HEALTH);
                 } else if (BuildVars.LOGS_ENABLED
                         && silentBackgroundTicks == BACKGROUND_SILENT_TICKS_BEFORE_PING) {
                     // Airplane mode, no coverage. The silence is not the server's fault and there is
@@ -653,17 +721,101 @@ public class VpnController implements SingBoxManager.StateListener {
             }
             return;
         }
-        int idx = vpnList.indexOf(currentVpn);
-        int next = (idx + 1) % vpnList.size();
-        if (next == idx) {
+        long now = SystemClock.elapsedRealtime();
+        // Every caller switches because the current server failed: pings, downloads giving up, a core
+        // error or a failed trial. Remember it, so the rotation skips this server for a while.
+        currentVpn.lastFailedElapsed = now;
+        VpnKeyInfo next = pickNextServer(now);
+        if (next == null || next == currentVpn) {
             return;
         }
-        currentVpn = vpnList.get(next);
+        boolean fresh = !failedRecently(next, now);
+        boolean trial = fresh && lastTunnelWorkedElapsed != 0
+                && now - lastTunnelWorkedElapsed < FAILED_SERVER_SKIP_MS;
+        if (BuildVars.LOGS_ENABLED) {
+            FileLog.d("VpnController: switching '" + currentVpn.getDisplayName() + "' -> '" + next.getDisplayName() + "'"
+                    + (fresh ? "" : " (every other server failed recently, taking the one that failed longest ago)")
+                    + (trial ? ", trial pings follow" : ", no trial"));
+        }
+        currentVpn = next;
         consecutivePingFailures = 0; // the new server gets a clean slate
         silentBackgroundTicks = 0;   // ...and a fresh silence window to prove itself in
+        if (trial) {
+            backgroundPingsWithoutTraffic = 0; // the backoff measured the old server
+        }
+        trialAfterConnect = trial;
         save();
         notifyList();
         reconnect();
+    }
+
+    private static boolean failedRecently(VpnKeyInfo info, long now) {
+        return info.lastFailedElapsed != 0 && now - info.lastFailedElapsed < FAILED_SERVER_SKIP_MS;
+    }
+
+    /**
+     * The next server in list order that has not failed within {@link #FAILED_SERVER_SKIP_MS}. If every
+     * other server has, the one whose failure is oldest, so a long outage still walks the whole list.
+     */
+    private VpnKeyInfo pickNextServer(long now) {
+        int idx = vpnList.indexOf(currentVpn);
+        VpnKeyInfo oldest = null;
+        for (int i = 1; i < vpnList.size(); i++) {
+            VpnKeyInfo candidate = vpnList.get((idx + i) % vpnList.size());
+            if (!failedRecently(candidate, now)) {
+                return candidate;
+            }
+            if (oldest == null || candidate.lastFailedElapsed < oldest.lastFailedElapsed) {
+                oldest = candidate;
+            }
+        }
+        return oldest;
+    }
+
+    private void startTrial() {
+        stopTrial();
+        trialStep = 0;
+        AndroidUtilities.runOnUIThread(trialRunnable, TRIAL_PING_DELAYS_MS[0]);
+    }
+
+    private void stopTrial() {
+        AndroidUtilities.cancelRunOnUIThread(trialRunnable);
+        trialStep = -1;
+        trialGeneration++;
+    }
+
+    private void runTrialPing() {
+        if (trialStep < 0) {
+            return;
+        }
+        if (!enabled || !autoSwitch || currentVpn == null || vpnList.size() < 2
+                || SingBoxManager.getInstance().getState() != SingBoxManager.STATE_CONNECTED) {
+            stopTrial();
+            return;
+        }
+        if (!ApplicationLoader.isNetworkOnline()) {
+            // No coverage says nothing about this server. Leave it to the regular health check.
+            if (BuildVars.LOGS_ENABLED) {
+                FileLog.d("VpnController: device offline - trial of '" + currentVpn.getDisplayName() + "' dropped");
+            }
+            stopTrial();
+            return;
+        }
+        measurePing(PING_TRIAL);
+    }
+
+    private void onTrialPingFailed() {
+        trialStep++;
+        if (trialStep < TRIAL_PING_DELAYS_MS.length) {
+            AndroidUtilities.runOnUIThread(trialRunnable, TRIAL_PING_DELAYS_MS[trialStep]);
+            return;
+        }
+        if (BuildVars.LOGS_ENABLED) {
+            FileLog.d("VpnController: '" + currentVpn.getDisplayName() + "' failed all " + trialStep
+                    + " trial pings after auto-switch - moving on");
+        }
+        stopTrial();
+        switchToNext();
     }
 
     /**

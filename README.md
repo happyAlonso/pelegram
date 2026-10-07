@@ -202,6 +202,32 @@ the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg
   network. The trigger is leaving a mini-app or web view, which brings the dialog list back and makes
   the stories bar preload again. This is upstream behaviour and not a battery problem, but it dominates
   the log and hides real download activity while reading one.
+- **Auto-switch rotates into servers it already knows are dead.** *Fixed in 1.4.1.* A log from 6
+  and 7 October had
+  seven servers in the list. Three of them never answered once in 23 hours (an unnamed Shadowsocks
+  key and both keys on one host), and `switchToNext` still picked each of them in turn: it takes the
+  next index and ignores the failed ping it recorded seconds earlier. In the background a dead server
+  costs about 22 minutes before the app moves on. It waits two silent ticks, then spends three pings
+  spaced by the outage backoff, and that backoff carries over from the previous server, so it had
+  already reached 300 s. On the night of 7 October the working server died at 06:51 and the app
+  reached the next working one at 07:48, after 46 minutes on two dead entries. The failure count is
+  not consecutive either. It resets only on a successful ping, so a blip at 03:08 still counted at
+  07:02, although the tunnel had carried traffic for the four hours between. Now a server that auto-switch
+  gave up on stays out of the rotation for 30 minutes unless every other server failed too, and a
+  switch to a fresh server starts a trial: three pings 5, 10 and 15 seconds apart, outside the
+  background backoff, after which the app moves on. The first answer ends the trial. A trial runs
+  only while the tunnel worked in the last 30 minutes, so an outage that takes every server down
+  costs one quick lap and then the old slow backoff. Traffic seen by a health-check tick now clears
+  the failure count. A replay of that night against the real `VpnController`, with a simulated clock
+  and the same seven servers, has the app working again 7 minutes after the server died, where the
+  old code took 35. Three separate 150-second blips on a working server over eight hours no longer
+  add up to a switch.
+- **The app feels slow after 100 hours or more of uptime.** Reported on 7 October. The logs sent
+  that day did not cover the slow process: it had run 138 hours, and the 32 MB log budget kept only
+  the last day, which started after the restart. In the 23 hours that were logged, message handling
+  stayed at a median of 5 ms from start to end, and the slow requests all fell in tunnel outages.
+  1.4.1 keeps 96 MB of logs (about three days). A report sent before the app is restarted should
+  show whether the slowdown is the tunnel or the app itself.
 
 ## Building from source
 

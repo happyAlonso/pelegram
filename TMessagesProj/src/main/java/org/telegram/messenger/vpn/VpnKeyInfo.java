@@ -6,13 +6,15 @@ import android.text.TextUtils;
 public class VpnKeyInfo {
 
     public String name;
-    public String key;   // raw URI: vpn:// / vless:// / hysteria2:// / awg .conf
+    public String key;   // raw URI: vpn:// / vless:// / hysteria2:// / ss:// / awg .conf
 
     // runtime status (not persisted)
     public boolean checking;
     public boolean available;
     public long ping;
     public long availableCheckTime;
+    /** elapsedRealtime when auto-switch last gave up on this server, 0 if never or it answered since. */
+    public long lastFailedElapsed;
 
     public VpnKeyInfo(String name, String key) {
         this.name = name;
@@ -47,6 +49,9 @@ public class VpnKeyInfo {
         }
         if (low.startsWith("hysteria2://") || low.startsWith("hy2://")) {
             return "Hysteria2";
+        }
+        if (low.startsWith("ss://")) {
+            return "Shadowsocks";
         }
         return "VPN";
     }
