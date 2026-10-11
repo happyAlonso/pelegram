@@ -15,6 +15,8 @@ public class VpnKeyInfo {
     public long availableCheckTime;
     /** elapsedRealtime when auto-switch last gave up on this server, 0 if never or it answered since. */
     public long lastFailedElapsed;
+    /** elapsedRealtime of the last ping it answered or traffic it carried, 0 if never in this process. */
+    public long lastWorkedElapsed;
 
     public VpnKeyInfo(String name, String key) {
         this.name = name;

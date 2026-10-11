@@ -228,6 +228,24 @@ the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg
   stayed at a median of 5 ms from start to end, and the slow requests all fell in tunnel outages.
   1.4.1 keeps 96 MB of logs (about three days). A report sent before the app is restarted should
   show whether the slowdown is the tunnel or the app itself.
+- **Auto-switch ignores network changes.** *Fixed in 1.4.1.* A 1.4.1 test-build log from 10 October:
+  the phone changed networks at
+  20:01, and from then on every server failed, including the two that had worked all day. Three
+  unrelated servers refused connections within 58 ms, faster than any of them answers, so the refusal
+  came from the network path and not from the servers. The app ran its quick lap through all seven
+  servers in five minutes and then fell back to the slow checks, as designed. The fallback then
+  picked the entries that failed longest ago, which on that list were the Shadowsocks key and a finn
+  key that had never answered once. The phone changed networks again at 20:53, 21:01 and 21:06, and
+  none of those changes triggered a new check. The tunnel came back at 21:07, when the user opened
+  the app and picked a server by hand. Now a network change resets the failure count and the
+  backoff and puts the current server on trial within seconds. At most once every 15 minutes it also
+  clears the failure marks of servers that worked before and allows a quick lap. When every server
+  is failing, servers that worked in this session come before keys that never answered. A replay of
+  that evening against the real `VpnController`, swept over 36 possible moments for the block to
+  lift, had the tunnel back after a median of 5 seconds and at worst 57 seconds, where the old code
+  took a median of 5 minutes and at worst 30. The price is paid only while every server is
+  unreachable and the phone keeps changing networks: 97 pings and 18 core restarts an hour, against
+  52 and 13. With a working tunnel a network change costs one ping.
 
 ## Building from source
 

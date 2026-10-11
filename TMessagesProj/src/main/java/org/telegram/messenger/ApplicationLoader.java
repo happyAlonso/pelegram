@@ -217,6 +217,11 @@ public class ApplicationLoader extends Application {
                         ConnectionsManager.getInstance(a).checkConnection();
                         FileLoader.getInstance(a).onNetworkChanged(isSlow);
                     }
+                    // The registration replays the current state as a sticky broadcast. That is not a
+                    // change, so only real ones reach the VPN auto-switch.
+                    if (!isInitialStickyBroadcast()) {
+                        org.telegram.messenger.vpn.VpnController.onNetworkChanged();
+                    }
                 }
             };
             IntentFilter filter = new IntentFilter(ConnectivityManager.CONNECTIVITY_ACTION);
