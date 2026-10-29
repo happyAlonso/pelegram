@@ -13,6 +13,9 @@ import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
 import java.util.zip.Inflater;
 
 /**
@@ -724,5 +727,116 @@ public class SingBoxConfigBuilder {
         } catch (Exception e) {
             return s;
         }
+    }
+
+    // ---- pasted text -> keys ----
+
+    private static final String[] KEY_SCHEMES = {"vless://", "hysteria2://", "hy2://", "ss://", "vpn://", "awg://", "wg://"};
+
+    /**
+     * The keys in a piece of pasted text. buildOutbound only accepts a string that starts with the
+     * scheme, so anything a copy brings along made a valid key unreadable: a label line, a sentence
+     * around it, or characters nobody can see (a zero-width space, a direction mark, a no-break
+     * space). Those are removed, and every vless/hysteria2/hy2/ss/vpn/awg/wg URI in the text is
+     * returned in order, each ending at the first whitespace. A sing-box JSON outbound or an
+     * awg-quick config is multi-line by nature and comes back whole. Empty when the text holds none
+     * of these, for example when only a host name from inside a key was copied.
+     */
+    public static List<String> extractKeys(String text) {
+        List<String> keys = new ArrayList<>();
+        if (text == null) {
+            return keys;
+        }
+        String clean = cleanPastedText(text);
+        String trimmed = clean.trim();
+        String lowerAll = trimmed.toLowerCase(Locale.ROOT);
+        if (trimmed.startsWith("{") || lowerAll.contains("[interface]")) {
+            keys.add(trimmed);
+            return keys;
+        }
+        String lower = clean.toLowerCase(Locale.ROOT);
+        int from = 0;
+        while (from < clean.length()) {
+            int start = -1;
+            for (String scheme : KEY_SCHEMES) {
+                int idx = lower.indexOf(scheme, from);
+                // "ss://" also ends "vless://" and "wg://" ends "awg://": a scheme only counts where
+                // no letter or digit runs into it
+                while (idx > 0 && Character.isLetterOrDigit(clean.charAt(idx - 1))) {
+                    idx = lower.indexOf(scheme, idx + 1);
+                }
+                if (idx >= 0 && (start < 0 || idx < start)) {
+                    start = idx;
+                }
+            }
+            if (start < 0) {
+                break;
+            }
+            int end = start;
+            while (end < clean.length() && !Character.isWhitespace(clean.charAt(end))) {
+                end++;
+            }
+            int keyEnd = end;
+            while (keyEnd > start && "\"'<>()[]{},;.".indexOf(clean.charAt(keyEnd - 1)) >= 0) {
+                keyEnd--;
+            }
+            keys.add(clean.substring(start, keyEnd));
+            from = end;
+        }
+        return keys;
+    }
+
+    /** Drops invisible format characters (Unicode Cf) and turns every kind of space into a plain one. */
+    private static String cleanPastedText(String text) {
+        StringBuilder b = new StringBuilder(text.length());
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (Character.getType(c) == Character.FORMAT) {
+                continue;
+            }
+            b.append(Character.isSpaceChar(c) && c != '\n' ? ' ' : c);
+        }
+        return b.toString();
+    }
+
+    /** The #name of a URI key, decoded, or null. Used as the default name when the field is empty. */
+    public static String keyName(String key) {
+        if (key == null || !key.contains("://")) {
+            return null;
+        }
+        int hash = key.lastIndexOf('#');
+        if (hash < 0 || hash == key.length() - 1) {
+            return null;
+        }
+        String name = decode(key.substring(hash + 1)).trim();
+        return name.isEmpty() ? null : name;
+    }
+
+    /**
+     * What a paste looked like, for the log, without anything secret: the length, the first and
+     * last characters as code points (an invisible one shows up here and nowhere else) and the
+     * schemes that were found.
+     */
+    public static String describePaste(String text) {
+        if (text == null) {
+            return "null";
+        }
+        StringBuilder b = new StringBuilder();
+        b.append(text.length()).append(" chars, starts");
+        for (int i = 0; i < Math.min(3, text.length()); i++) {
+            b.append(String.format(Locale.ROOT, " U+%04X", (int) text.charAt(i)));
+        }
+        b.append(", ends");
+        for (int i = Math.max(0, text.length() - 2); i < text.length(); i++) {
+            b.append(String.format(Locale.ROOT, " U+%04X", (int) text.charAt(i)));
+        }
+        List<String> keys = extractKeys(text);
+        b.append(", keys found: ").append(keys.size());
+        for (String key : keys) {
+            int sep = key.indexOf("://");
+            b.append(" ").append(sep > 0 ? key.substring(0, sep) : (key.startsWith("{") ? "json" : "conf"))
+                    .append("(").append(key.length()).append(")");
+        }
+        return b.toString();
     }
 }

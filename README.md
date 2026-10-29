@@ -246,6 +246,17 @@ the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg
   took a median of 5 minutes and at worst 30. The price is paid only while every server is
   unreachable and the phone keeps changing networks: 97 pings and 18 core restarts an hour, against
   52 and 13. With a working tunnel a network change costs one ping.
+- **A pasted key that is not alone in the text is rejected.** *Fixed in 1.4.2.* On 29 October a VLESS
+  and a Hysteria2 key for a new server both failed with "Could not read this VPN key", although the
+  parser reads both strings without trouble. The add screen handed the whole field to the parser,
+  which only accepts text that starts with the scheme. A label line, a sentence around the key, or
+  an invisible character picked up by the copy (a zero-width space, a direction mark, a no-break
+  space) was enough to reject it, and two keys pasted together kept the first and folded the
+  second into its name. The rejection was never logged. The add screen now drops invisible
+  characters, finds every key in the text, adds them all and names each from its `#name` part.
+  Text with no key at all, such as a host name copied out of a key through a link, gets its own
+  message. Each paste is logged as length, first and last characters as code points, and the key
+  types found, with nothing secret in it.
 
 ## Building from source
 

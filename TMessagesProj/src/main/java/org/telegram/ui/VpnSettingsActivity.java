@@ -379,24 +379,44 @@ public class VpnSettingsActivity extends BaseFragment {
             }
             return;
         }
-        // add mode (or raw-key edit)
-        String key = rawKeyField.getText().toString().trim();
-        if (key.isEmpty()) {
-            Toast.makeText(getParentActivity(), getString(R.string.VpnInvalidKey), Toast.LENGTH_SHORT).show();
-            return;
-        }
-        try {
-            SingBoxConfigBuilder.buildOutbound(key);
-        } catch (Exception e) {
-            Toast.makeText(getParentActivity(), getString(R.string.VpnInvalidKey), Toast.LENGTH_SHORT).show();
+        // add mode (or raw-key edit). The field holds whatever was pasted, which is not always a
+        // bare key: see SingBoxConfigBuilder.extractKeys. Until 1.4.2 a rejected paste left no trace
+        // in the log, so a key that worked everywhere else could not be told apart from a bad one.
+        String pasted = rawKeyField.getText().toString();
+        List<String> keys = SingBoxConfigBuilder.extractKeys(pasted);
+        FileLog.d("VpnSettings: pasted " + SingBoxConfigBuilder.describePaste(pasted));
+        if (keys.isEmpty()) {
+            Toast.makeText(getParentActivity(), getString(R.string.VpnNoKeyFound), Toast.LENGTH_LONG).show();
             return;
         }
         if (editingInfo != null) {
-            editingInfo.key = key;
+            keys = keys.subList(0, 1); // editing replaces one key
+        }
+        List<VpnKeyInfo> added = new ArrayList<>();
+        for (String key : keys) {
+            try {
+                SingBoxConfigBuilder.buildOutbound(key);
+            } catch (Exception e) {
+                int sep = key.indexOf("://");
+                FileLog.e("VpnSettings: " + (sep > 0 ? key.substring(0, sep) : "key") + " key rejected: " + e);
+                continue;
+            }
+            String keyName = !name.isEmpty() && keys.size() == 1 ? name : SingBoxConfigBuilder.keyName(key);
+            added.add(new VpnKeyInfo(keyName == null ? name : keyName, key));
+        }
+        if (added.isEmpty()) {
+            Toast.makeText(getParentActivity(), getString(R.string.VpnInvalidKey), Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (added.size() < keys.size()) {
+            Toast.makeText(getParentActivity(), LocaleController.formatString(R.string.VpnSomeKeysInvalid, added.size(), keys.size()), Toast.LENGTH_LONG).show();
+        }
+        if (editingInfo != null) {
+            editingInfo.key = added.get(0).key;
             editingInfo.name = name;
             VpnController.getInstance().updateVpn(editingInfo);
         } else {
-            VpnController.getInstance().addVpn(new VpnKeyInfo(name, key));
+            VpnController.getInstance().addVpns(added);
         }
         finishFragment();
     }

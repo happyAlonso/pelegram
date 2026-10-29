@@ -18,6 +18,8 @@ import org.telegram.tgnet.ConnectionsManager;
 import org.telegram.utils.proxy.ProxySettings;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
 /**
  * Owns the saved VPN keys, the "use VPN" / "auto-switch" flags and timeout, and the selection, and
@@ -350,9 +352,20 @@ public class VpnController implements SingBoxManager.StateListener {
     }
 
     public void addVpn(VpnKeyInfo info) {
-        vpnList.add(0, info);
+        addVpns(Collections.singletonList(info));
+    }
+
+    /**
+     * Adds keys at the top of the list in the given order, with one save and one reconnect, so a
+     * paste that holds several keys does not restart the core once per key.
+     */
+    public void addVpns(List<VpnKeyInfo> infos) {
+        if (infos.isEmpty()) {
+            return;
+        }
+        vpnList.addAll(0, infos);
         if (currentVpn == null) {
-            currentVpn = info;
+            currentVpn = infos.get(0);
         }
         save();
         notifyList();

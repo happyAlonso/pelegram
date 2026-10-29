@@ -32,6 +32,8 @@
     <string name="VpnDeleteTitle">Delete connection</string>
     <string name="VpnDeleteText">Delete this VPN connection?</string>
     <string name="VpnInvalidKey">Could not read this VPN key</string>
+    <string name="VpnNoKeyFound">No VPN key in the pasted text. A key starts with vless://, hysteria2://, ss:// or vpn://, or is an AmneziaWG config. Copy the whole message, not a link inside it.</string>
+    <string name="VpnSomeKeysInvalid">Added %1$d of %2$d keys. The others could not be read.</string>
     <string name="English">English</string>
     <string name="LanguageNameInEnglish">English</string>
     <string name="LanguageCode">en</string>
