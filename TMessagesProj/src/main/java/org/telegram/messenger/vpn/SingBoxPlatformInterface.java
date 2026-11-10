@@ -1,5 +1,7 @@
 package org.telegram.messenger.vpn;
 
+import libbox.BridgeOptions;
+import libbox.BridgeSession;
 import libbox.ConnectionOwner;
 import libbox.InterfaceUpdateListener;
 import libbox.NetworkInterfaceIterator;
@@ -15,8 +17,8 @@ import libbox.WIFIState;
  * Minimal libbox PlatformInterface for the app-scoped SOCKS mode.
  *
  * We run sing-box with a `socks` inbound only (no `tun` inbound), so openTun() is never
- * invoked and the OS-integration hooks below are not needed. The usePlatform and useProcFS
- * toggles return false so the Go core does its own interface handling instead of calling
+ * invoked and the OS-integration hooks below are not needed. The usePlatform toggles return
+ * false so the Go core does its own interface handling instead of calling
  * back into these stubs. If a future TUN (full-device) mode is added, this class is where
  * the VpnService fd + interface monitoring get implemented.
  */
@@ -52,8 +54,13 @@ public class SingBoxPlatformInterface implements PlatformInterface {
     }
 
     @Override
-    public boolean useProcFS() {
+    public boolean usePlatformBridge() {
         return false;
+    }
+
+    @Override
+    public BridgeSession createBridge(BridgeOptions options) throws Exception {
+        throw new UnsupportedOperationException("bridge not supported");
     }
 
     @Override
@@ -127,6 +134,10 @@ public class SingBoxPlatformInterface implements PlatformInterface {
 
     @Override
     public void sendNotification(Notification notification) {
+    }
+
+    @Override
+    public void cancelNotification(String identifier, int typeID) {
     }
 
     @Override

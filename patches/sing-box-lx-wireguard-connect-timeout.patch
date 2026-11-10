@@ -1,11 +1,11 @@
 diff --git a/protocol/wireguard/endpoint.go b/protocol/wireguard/endpoint.go
-index abdb7a7..854fbcb 100644
+index 61631f4..d1a6a70 100644
 --- a/protocol/wireguard/endpoint.go
 +++ b/protocol/wireguard/endpoint.go
-@@ -72,6 +72,16 @@ type Endpoint struct {
- 	idleAsleep   atomic.Bool
- 	resumeMu     sync.Mutex
- 	// lx:end idle-suspend
+@@ -106,6 +106,16 @@ type Endpoint struct {
+ 	// resumeOnDial wake aborts instead of starting a fresh device rebuild that
+ 	// Close would then have to wait out. SPEC 030 fast shutdown.
+ 	closing atomic.Bool
 +	// connectTimeout bounds a TCP connect made *through* the tunnel. The netstack dial
 +	// (DialTCPWithBind -> gVisor) takes its deadline from the context and nothing upstream
 +	// sets one, so a black-holed destination is retried by gVisor's own SYN schedule until
@@ -19,10 +19,10 @@ index abdb7a7..854fbcb 100644
  }
  
  func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.WireGuardEndpointOptions) (adapter.Endpoint, error) {
-@@ -86,6 +96,10 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
- 		awgActive: options.AmneziaWGOptions.IsSet(),
- 		detour:    options.Detour,
- 		// lx:end awg
+@@ -124,6 +134,10 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
+ 		logger:         logger,
+ 		localAddresses: options.Address,
+ 		listenMode:     options.ListenPort != 0, // lx: SPEC 020 — no dial path, never idle-suspend
 +		connectTimeout: time.Duration(options.ConnectTimeout),
 +	}
 +	if ep.connectTimeout <= 0 {
@@ -30,17 +30,17 @@ index abdb7a7..854fbcb 100644
  	}
  	if options.Detour != "" && options.ListenPort != 0 {
  		return nil, E.New("`listen_port` is conflict with `detour`")
-@@ -427,6 +441,8 @@ func (w *Endpoint) DialContext(ctx context.Context, network string, destination
- 	if !w.resumeOnDial() { // lx: SPEC 020 — stamp activity + wake if idle-suspended
- 		return nil, E.New("WireGuard is not ready yet")
- 	}
+@@ -648,6 +662,8 @@ func (w *Endpoint) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn,
+ func (w *Endpoint) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+ 	// lx: SPEC 097 — in flight: the build budget must not evict us mid-dial.
+ 	defer w.leaveDial(w.enterDial())
 +	ctx, cancel := w.dialDeadlineContext(ctx, network)
 +	defer cancel()
- 	if destination.IsDomain() {
- 		destinationAddresses, err := w.dnsRouter.Lookup(ctx, destination.Fqdn, adapter.DNSQueryOptions{})
- 		if err != nil {
-@@ -439,6 +455,22 @@ func (w *Endpoint) DialContext(ctx context.Context, network string, destination
- 	return w.endpoint.DialContext(ctx, network, destination)
+ 	switch network {
+ 	case N.NetworkTCP:
+ 		w.logger.InfoContext(ctx, "outbound connection to ", destination)
+@@ -675,6 +691,22 @@ func (w *Endpoint) DialContext(ctx context.Context, network string, destination
+ 	return w.netstackLx(ctx).DialContext(ctx, network, destination) // lx: SPEC 139 — upstream: w.endpoint
  }
  
 +// dialDeadlineContext bounds a TCP connect made through the tunnel.
@@ -60,8 +60,8 @@ index abdb7a7..854fbcb 100644
 +}
 +
  func (w *Endpoint) ListenPacketWithDestination(ctx context.Context, destination M.Socksaddr) (net.PacketConn, netip.Addr, error) {
- 	w.logger.InfoContext(ctx, "outbound packet connection to ", destination)
- 	if !w.resumeOnDial() { // lx: SPEC 020 — stamp activity + wake if idle-suspended
+ 	// lx: SPEC 097 — in flight: the build budget must not evict us mid-dial.
+ 	defer w.leaveDial(w.enterDial())
 diff --git a/protocol/wireguard/endpoint_connect_timeout_lx_test.go b/protocol/wireguard/endpoint_connect_timeout_lx_test.go
 new file mode 100644
 index 0000000..bcc7a89

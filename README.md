@@ -257,6 +257,17 @@ the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg
   Text with no key at all, such as a host name copied out of a key through a link, gets its own
   message. Each paste is logged as length, first and last characters as code points, and the key
   types found, with nothing secret in it.
+- **AmneziaWG 3.1 keys are rejected.** *Fixed in 1.5.1.* A vpn:// key from a server running
+  AmneziaWG 3.1 failed with "Could not read this VPN key". The key's config gives
+  `PersistentKeepalive` as a range (`25-35`), which the parser fed to `Integer.parseInt`. It also
+  carries eight settings the parser ignored and the tunnel core did not know:
+  `HeaderProtectionKey` (a ChaCha20 mask over the packet headers), `RandomTrailers`,
+  `DisableCookies`, and five timers given as ranges (`RekeyAfterTime`, `RekeyTimeout`,
+  `RejectAfterTime`, `KeepaliveTimeout`, `MaxHandshakeAttempts`). Without the header protection the
+  server cannot read a single packet, so parsing alone would not have helped. 1.5.1 maps every
+  one of them, plus `ContentPaddingAddition`, onto the endpoint, and moves the tunnel core from
+  sing-box-lx 1.14.0-lx.2 to 1.14.4-lx.33, whose WireGuard fork implements AmneziaWG 3.x. The
+  Shadowsocks prefix and the tunnel connect deadline are carried over as patches.
 
 ## Building from source
 

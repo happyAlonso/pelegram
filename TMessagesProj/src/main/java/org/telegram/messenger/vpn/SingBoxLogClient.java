@@ -6,6 +6,7 @@ import libbox.CommandClient;
 import libbox.CommandClientHandler;
 import libbox.CommandClientOptions;
 import libbox.ConnectionEvents;
+import libbox.DnsQuery;
 import libbox.Libbox;
 import libbox.LogEntry;
 import libbox.LogIterator;
@@ -92,4 +93,5 @@ final class SingBoxLogClient implements CommandClientHandler {
     @Override public void writeGroups(OutboundGroupIterator message) {}
     @Override public void writeOutbounds(OutboundGroupItemIterator message) {}
     @Override public void writeStatus(StatusMessage message) {}
+    @Override public void writeDNSQuery(DnsQuery query) {}
 }

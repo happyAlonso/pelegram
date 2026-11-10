@@ -25,8 +25,10 @@ prefix.
 
 ## Files
 
-- `sing-shadowsocks2-v0.2.1-salt-prefix.patch` - patches
-  `github.com/sagernet/sing-shadowsocks2@v0.2.1` (`shadowaead/method.go`) with two things:
+- `sing-shadowsocks2-v0.2.2-salt-prefix.patch` - patches
+  `github.com/sagernet/sing-shadowsocks2@v0.2.2-0.20260929152114-a69d1086332b`, the version
+  sing-box-lx v1.14.4-lx.33 requires (`shadowaead/method.go`, which did not change since
+  v0.2.1), with two things:
   - `Method.SetSaltPrefix([]byte)` - the client's `writeRequest` writes the prefix ahead of
     the random salt tail.
   - a `coalesceConn` wrapper (used only when a prefix is set) that holds the first writes for
@@ -57,16 +59,18 @@ prefix.
 ## Rebuild the AAR
 
 ```sh
-# 1. patched sing-shadowsocks2 (baseline v0.2.1)
-git clone https://github.com/sagernet/sing-shadowsocks2 sing-shadowsocks2-lx
-git -C sing-shadowsocks2-lx checkout v0.2.1
-git -C sing-shadowsocks2-lx apply /path/to/patches/sing-shadowsocks2-v0.2.1-salt-prefix.patch
+# 1. patched sing-shadowsocks2 (the commit sing-box-lx v1.14.4-lx.33 pins)
+git clone https://github.com/sagernet/sing-shadowsocks2 sing-shadowsocks2-lx-v022
+git -C sing-shadowsocks2-lx-v022 checkout a69d1086332b
+git -C sing-shadowsocks2-lx-v022 apply /path/to/patches/sing-shadowsocks2-v0.2.2-salt-prefix.patch
 
-# 2. sing-box-lx (Leadaxe fork) next to it, with both sing-box patches
-git clone https://github.com/Leadaxe/sing-box-lx
+# 2. sing-box-lx (Leadaxe fork) next to it, all four submodules, both sing-box patches
+git clone --branch v1.14.4-lx.33 https://github.com/Leadaxe/sing-box-lx
+git -C sing-box-lx submodule update --init --depth 1 \
+  submodules/wireguard-go submodules/sing-tun submodules/gvisor submodules/utls
 git -C sing-box-lx apply /path/to/patches/sing-box-lx-shadowsocks-prefix.patch
 git -C sing-box-lx apply /path/to/patches/sing-box-lx-wireguard-connect-timeout.patch
-# the shadowsocks patch's replace expects ../sing-shadowsocks2-lx relative to sing-box-lx
+# the shadowsocks patch's replace expects ../sing-shadowsocks2-lx-v022 relative to sing-box-lx
 
 # 3. build (arm64) - GOFLAGS=-mod=mod so the local replace is honored
 cd sing-box-lx

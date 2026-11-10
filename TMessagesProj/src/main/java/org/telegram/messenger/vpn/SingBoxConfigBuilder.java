@@ -642,6 +642,18 @@ public class SingBoxConfigBuilder {
                     case "i3": o.put("i3", v); break;
                     case "i4": o.put("i4", v); break;
                     case "i5": o.put("i5", v); break;
+                    // AmneziaWG 3.x (header protection, padding, timing) and 3.1 (random trailers,
+                    // no cookie replies), mapped 1:1 onto sing-box-lx's AmneziaWGOptions. The ranged
+                    // values arrive as "N-M" (re-picked by the core at every use) or a single number.
+                    case "headerprotectionkey": o.put("header_protection_key", v); break;
+                    case "contentpaddingaddition": putAwgRange(o, "content_padding_addition", v); break;
+                    case "rekeyaftertime": putAwgRange(o, "rekey_after_time", v); break;
+                    case "rekeytimeout": putAwgRange(o, "rekey_timeout", v); break;
+                    case "rejectaftertime": putAwgRange(o, "reject_after_time", v); break;
+                    case "keepalivetimeout": putAwgRange(o, "keepalive_timeout", v); break;
+                    case "maxhandshakeattempts": putAwgRange(o, "max_handshake_attempts", v); break;
+                    case "randomtrailers": if (isAwgOn(v)) o.put("random_trailers", true); break;
+                    case "disablecookies": if (isAwgOn(v)) o.put("disable_cookies", true); break;
                     default: break;
                 }
             } else if (section.contains("peer")) {
@@ -649,7 +661,9 @@ public class SingBoxConfigBuilder {
                     case "publickey": peer.put("public_key", v); break;
                     case "presharedkey": peer.put("pre_shared_key", v); break;
                     case "endpoint": endpoint = v; break;
-                    case "persistentkeepalive": peer.put("persistent_keepalive_interval", Integer.parseInt(v)); break;
+                    // AWG 3.x configs give a "min-max" range here, which Integer.parseInt rejected,
+                    // so such a key could not be added at all.
+                    case "persistentkeepalive": putAwgRange(peer, "persistent_keepalive_interval", v); break;
                     case "allowedips": {
                         JSONArray allowed = new JSONArray();
                         for (String a : v.split(",")) allowed.put(a.trim());
@@ -719,6 +733,39 @@ public class SingBoxConfigBuilder {
         o.put("address", localAddress);
         o.put("peers", new JSONArray().put(peer));
         return o;
+    }
+
+    /**
+     * An AmneziaWG "number or inclusive range" value: "N" goes in as a number (what plain WireGuard
+     * fields expect), "N-M" as the string sing-box-lx's AWGRange parses. Anything else is an error
+     * naming the key, so a bad config fails visibly instead of with a bare NumberFormatException.
+     */
+    private static void putAwgRange(JSONObject o, String key, String value) throws Exception {
+        String v = value.replace(" ", "");
+        int dash = v.indexOf('-');
+        try {
+            if (dash < 0) {
+                o.put(key, Long.parseLong(v));
+                return;
+            }
+            long min = Long.parseLong(v.substring(0, dash));
+            long max = Long.parseLong(v.substring(dash + 1));
+            if (min > max) {
+                throw new NumberFormatException();
+            }
+            if (min == max) {
+                o.put(key, min);
+            } else {
+                o.put(key, min + "-" + max);
+            }
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("AmneziaWG " + key + " is not a number or N-M range: " + value);
+        }
+    }
+
+    private static boolean isAwgOn(String value) {
+        String v = value.trim().toLowerCase();
+        return v.equals("on") || v.equals("true") || v.equals("1") || v.equals("yes");
     }
 
     private static String decode(String s) {
