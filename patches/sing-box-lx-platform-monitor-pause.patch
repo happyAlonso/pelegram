@@ -1,0 +1,21 @@
+diff --git a/route/network.go b/route/network.go
+index f7a2df6..045f10f 100644
+--- a/route/network.go
++++ b/route/network.go
+@@ -223,7 +223,15 @@ func (r *NetworkManager) Start(stage adapter.StartStage, scope *adapter.Scope) e
+ 		})
+ 		r.interfaceUpdateAccess.Lock()
+ 		r.startedCtx = scope.Context()
+-		if r.interfaceMonitor != nil {
++		// lx (pelegram): with a platform interface the monitor's first report
++		// arrives through notifyInterfaceUpdate, which marks networkResetPending
++		// and leaves the dispatch to this point. A platform monitor that never
++		// reports (pelegram runs the core as an app-scoped SOCKS proxy and has
++		// no default-interface monitor) has nothing to deliver, and dispatching
++		// anyway reads "no default interface" and pauses the network: the
++		// WireGuard endpoint then takes its device down and never opens its UDP
++		// socket. 1.14.0 dispatched only from the callback.
++		if r.interfaceMonitor != nil && (r.platformInterface == nil || r.networkResetPending) {
+ 			r.dispatchInterfaceUpdateLocked()
+ 		}
+ 		r.interfaceUpdateAccess.Unlock()

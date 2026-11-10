@@ -268,26 +268,38 @@ the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg
   one of them, plus `ContentPaddingAddition`, onto the endpoint, and moves the tunnel core from
   sing-box-lx 1.14.0-lx.2 to 1.14.4-lx.33, whose WireGuard fork implements AmneziaWG 3.x. The
   Shadowsocks prefix and the tunnel connect deadline are carried over as patches.
-- **AmneziaWG 3.1 tunnels go dead about 20 seconds after connecting.** *Detected and shown in
-  1.5.2, the cause is outside the app.* Both AWG 3.1 servers in a 10 November log carried no
-  traffic at all. One of those keys was then run from a desktop on the same core. The tunnel
-  worked for 16 to 24 seconds after every handshake and went silent until the next one, whatever
-  the traffic: a 3 MB download right after the handshake finished in under a second, and a single
-  request after 28 idle seconds failed. An `strace` of the core's UDP socket showed the server
-  still sending, two or three datagrams a second plus bursts of up to 68. With the header
-  protection key the headers could be unmasked, and from about 21 seconds on every data packet
-  carried a receiver index the client never issued, with a counter climbing from 39 to 969. That
-  is a second client's session on the same key. A WireGuard server keeps one session and one
-  endpoint per key, so each client's handshake takes the session from the other, and the server
-  sends traffic sealed for one client to whichever client sent last. No client-side change can
-  fix that. The key has to be used on one device only. The core dropped those packets silently,
-  so the phone log showed only connect timeouts. 1.5.2 patches the core to log an error when such
-  packets keep arriving while it holds a live session of its own
-  (`patches/wireguard-go-lx-foreign-session.patch`). Run against the same server while the second
-  client was still online, the patched core logged that error within 40 seconds. The app then marks
-  the server "Key in use on another device" for 30 minutes, writes it to the log and, with
-  auto-switch on, moves to the next server. The phone log of 10 November ran the core at log level
-  warn, so it cannot show which of the two keys had a second user at the time.
+- **AmneziaWG and Hysteria2 tunnels never connect on 1.5.1.** *Fixed in 1.5.2.* In a log from
+  10 November all three AmneziaWG 3.1 servers failed on the phone from the first second, and
+  Hysteria2 failed almost every time, while VLESS and Shadowsocks worked. The same keys run from a
+  desktop, through the same core and the same generated config, connected at once. On the phone,
+  over adb, `/proc/net/udp` showed that pelegram held no UDP socket at all while an AmneziaWG server
+  was active, and the core logged no send error: the WireGuard device was down. The cause is a
+  change in the 1.14.4 core that 1.5.1 moved to. At start the core now asks the platform once for
+  the default network interface, and when there is none it pauses the network, which takes the
+  WireGuard device down and closes its socket. pelegram runs the core as an app-scoped SOCKS proxy,
+  and its platform interface never reports an interface, so every start ended paused. The 1.14.0
+  core asked only after the platform reported a change, which pelegram never does. A desktop core
+  reads the interface from the operating system and cannot show the bug. Any WireGuard or
+  AmneziaWG key is affected, whatever its version. 1.5.2 patches the core to run that start-up check
+  only after the platform has reported an interface
+  (`patches/sing-box-lx-platform-monitor-pause.patch`). On the same phone the three AmneziaWG
+  servers then answered in 136 to 211 ms, and both Hysteria2 servers in 142 and 171 ms.
+- **Two devices on one AmneziaWG key.** *Detected and shown since 1.5.2.* A WireGuard server keeps
+  one session and one endpoint per key. When two clients use the same key, each handshake takes the
+  session from the other client, and the server sends traffic sealed for one of them to whichever
+  sent last. No client-side change can fix that, so the key has to be used on one device only. This
+  turned up on 10 November while the failures above were being traced. One of the keys, run from a
+  desktop, worked for 16 to 24 seconds after every handshake and then went silent until the next
+  one. An `strace` of the core's UDP socket showed the server still sending, and with the header
+  protection key the headers could be unmasked: from about 21 seconds on every data packet carried a
+  receiver index the client never issued, with a counter climbing from 39 to 969. That is a second
+  client's session on the same key. It was first taken for the cause of the phone failures, which
+  it was not. The core dropped such packets without a log line. 1.5.2 patches it to log an error
+  when they keep arriving while it holds a live session of its own
+  (`patches/wireguard-go-lx-foreign-session.patch`). The app then marks the server "Key in use on
+  another device" for 30 minutes, writes it to the log and, with auto-switch on, moves to the next
+  server. The app reads the core's log stream whether logging is on or not, so the mark does not
+  depend on Enable Logs.
 
 ## Building from source
 

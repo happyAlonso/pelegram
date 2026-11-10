@@ -1,6 +1,6 @@
 # Native core patches
 
-Three independent changes are built into `TMessagesProj/libs/libbox-lx.aar`.
+Four independent changes are built into `TMessagesProj/libs/libbox-lx.aar`.
 
 **Outline `prefix` disguise.** The Shadowsocks core is patched so that `ss://` keys apply
 Outline's `prefix`: the Shadowsocks salt begins with attacker-supplied bytes shaped like a
@@ -12,6 +12,9 @@ connect made through the tunnel. See the file list below for why.
 
 **Shared-key report.** The WireGuard device is patched to log an error when data packets for a
 session it never had keep arriving, which is what a second client on the same key looks like.
+
+**Network pause on Android.** The core's network manager is patched so that a platform which never
+reports a default interface does not leave the core paused. See the file list below.
 
 These patch files exist so the prebuilt AAR can be rebuilt from source. They are not
 consumed by the Gradle build - the shipped artifact is the committed `.aar`.
@@ -74,6 +77,18 @@ prefix.
   patched core they failed 16 of 32 and each logged the line once. One client alone passed 16 of
   16 with no line. Against the real AWG 3.1 server, with the key also in use elsewhere, the
   patched core logged the line within 40 s.
+- `sing-box-lx-platform-monitor-pause.patch` - patches `route/network.go`. With a platform
+  interface, sing-box takes the default network interface from the platform's monitor, and 1.14.4
+  checks it once at start. No interface means the network is paused, and a paused WireGuard
+  endpoint takes its device down and closes its UDP socket. pelegram's platform interface never
+  reports an interface, because the core runs as an app-scoped SOCKS proxy. On 1.5.1 every
+  AmneziaWG tunnel therefore stayed down from the start and Hysteria2 failed almost every time,
+  while the same config worked from a desktop core, which reads the interface from the operating
+  system. 1.14.0 checked only when the monitor reported a change. The patch runs the start-up check
+  only when there is no platform interface or the platform has already reported one, which gives
+  pelegram the 1.14.0 behaviour back and leaves platforms with a working monitor as they were.
+  Verified on a phone over adb: without the patch the app held no UDP socket while an AmneziaWG
+  server was active, and with it the three AmneziaWG servers answered in 136 to 211 ms.
 
 ## Rebuild the AAR
 
@@ -83,14 +98,15 @@ git clone https://github.com/sagernet/sing-shadowsocks2 sing-shadowsocks2-lx-v02
 git -C sing-shadowsocks2-lx-v022 checkout a69d1086332b
 git -C sing-shadowsocks2-lx-v022 apply /path/to/patches/sing-shadowsocks2-v0.2.2-salt-prefix.patch
 
-# 2. sing-box-lx (Leadaxe fork) next to it, all four submodules, both sing-box patches and
-#    the wireguard-go patch inside its submodule
+# 2. sing-box-lx (Leadaxe fork) next to it, all four submodules, the three sing-box patches
+#    and the wireguard-go patch inside its submodule
 git clone --branch v1.14.4-lx.33 https://github.com/Leadaxe/sing-box-lx
 git -C sing-box-lx submodule update --init --depth 1 \
   submodules/wireguard-go submodules/sing-tun submodules/gvisor submodules/utls
 git -C sing-box-lx apply /path/to/patches/sing-box-lx-shadowsocks-prefix.patch
 git -C sing-box-lx apply /path/to/patches/sing-box-lx-wireguard-connect-timeout.patch
 git -C sing-box-lx/submodules/wireguard-go apply /path/to/patches/wireguard-go-lx-foreign-session.patch
+git -C sing-box-lx apply /path/to/patches/sing-box-lx-platform-monitor-pause.patch
 # the shadowsocks patch's replace expects ../sing-shadowsocks2-lx-v022 relative to sing-box-lx
 
 # 3. build (arm64) - GOFLAGS=-mod=mod so the local replace is honored

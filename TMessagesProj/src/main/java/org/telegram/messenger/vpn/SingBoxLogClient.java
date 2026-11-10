@@ -1,5 +1,6 @@
 package org.telegram.messenger.vpn;
 
+import org.telegram.messenger.BuildVars;
 import org.telegram.messenger.FileLog;
 
 import libbox.CommandClient;
@@ -76,15 +77,28 @@ final class SingBoxLogClient implements CommandClientHandler {
      */
     private static final String KEY_IN_USE_ELSEWHERE = "another client is using the same private key";
 
+    /** Log tag of the core's endpoints (box.go: "endpoint/" + type + "[" + tag + "]"). */
+    private static final String ENDPOINT_TAG = "endpoint/";
+
+    /**
+     * wireguard-go names the peer in every line about it: "peer(AbCd…WxYz) - received handshake
+     * response". The endpoint's other info lines are one per proxied connection and stay out.
+     */
+    private static final String PEER_PREFIX = "peer(";
+
     @Override
     public void writeLogs(LogIterator it) {
         try {
             while (it.hasNext()) {
                 LogEntry e = it.next();
-                if (e.getLevel() >= LEVEL_INFO) {
+                String message = e.getMessage();
+                // With logging on the core runs at debug (SingBoxConfigBuilder), and the WireGuard
+                // device's per-peer lines (handshake sent / received / retried, keepalives) are
+                // kept: without them a tunnel whose server never answers shows only dial timeouts.
+                if (e.getLevel() >= LEVEL_INFO && !(BuildVars.LOGS_ENABLED && message != null
+                        && message.contains(ENDPOINT_TAG) && message.contains(PEER_PREFIX))) {
                     continue;
                 }
-                String message = e.getMessage();
                 FileLog.d("singbox-core: " + message);
                 if (message != null && message.contains(KEY_IN_USE_ELSEWHERE)) {
                     VpnController.onKeyInUseElsewhere();

@@ -144,11 +144,12 @@ public class SingBoxManager implements CommandServerHandler {
             activeKey = rawKey;
 
             // Mirror the sing-box core log stream into FileLog (so dial/reset/DNS lines are reachable
-            // via the app's log export) - only when logging is on, so normal runs pay nothing.
-            if (BuildVars.LOGS_ENABLED) {
-                logClient = new SingBoxLogClient();
-                logClient.start();
-            }
+            // via the app's log export). Always on: the client also catches the core's shared-key
+            // report (SingBoxLogClient.KEY_IN_USE_ELSEWHERE), which must work with logging off.
+            // With logging off the core runs at warn, so the stream is only warnings and errors,
+            // and FileLog.d drops them unwritten.
+            logClient = new SingBoxLogClient();
+            logClient.start();
         }
 
         // Point tgnet at the local SOCKS5. Empty secret/user/pass = plain SOCKS5 path. Flag the

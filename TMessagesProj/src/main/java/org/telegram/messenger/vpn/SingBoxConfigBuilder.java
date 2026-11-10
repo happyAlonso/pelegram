@@ -7,6 +7,7 @@ import android.util.Base64;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
+import org.telegram.messenger.BuildVars;
 
 import java.io.ByteArrayOutputStream;
 import java.net.Inet4Address;
@@ -117,7 +118,9 @@ public class SingBoxConfigBuilder {
         // "warn", not "info": at info the core logs every proxied connection (each HTTP request,
         // DNS query, MTProto dial), which the log client mirrors into FileLog - that alone grew
         // the app log by tens of MB per day and kept the disk busy 24/7 when logging was enabled.
-        log.put("level", "warn");
+        // With logging on: debug, so the WireGuard device's handshake lines exist at all
+        // (SingBoxLogClient keeps only those of the debug stream).
+        log.put("level", BuildVars.LOGS_ENABLED ? "debug" : "warn");
         log.put("timestamp", true);
 
         JSONObject root = new JSONObject();
