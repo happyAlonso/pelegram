@@ -268,6 +268,26 @@ the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg
   one of them, plus `ContentPaddingAddition`, onto the endpoint, and moves the tunnel core from
   sing-box-lx 1.14.0-lx.2 to 1.14.4-lx.33, whose WireGuard fork implements AmneziaWG 3.x. The
   Shadowsocks prefix and the tunnel connect deadline are carried over as patches.
+- **AmneziaWG 3.1 tunnels go dead about 20 seconds after connecting.** *Detected and shown in
+  1.5.2, the cause is outside the app.* Both AWG 3.1 servers in a 10 November log carried no
+  traffic at all. One of those keys was then run from a desktop on the same core. The tunnel
+  worked for 16 to 24 seconds after every handshake and went silent until the next one, whatever
+  the traffic: a 3 MB download right after the handshake finished in under a second, and a single
+  request after 28 idle seconds failed. An `strace` of the core's UDP socket showed the server
+  still sending, two or three datagrams a second plus bursts of up to 68. With the header
+  protection key the headers could be unmasked, and from about 21 seconds on every data packet
+  carried a receiver index the client never issued, with a counter climbing from 39 to 969. That
+  is a second client's session on the same key. A WireGuard server keeps one session and one
+  endpoint per key, so each client's handshake takes the session from the other, and the server
+  sends traffic sealed for one client to whichever client sent last. No client-side change can
+  fix that. The key has to be used on one device only. The core dropped those packets silently,
+  so the phone log showed only connect timeouts. 1.5.2 patches the core to log an error when such
+  packets keep arriving while it holds a live session of its own
+  (`patches/wireguard-go-lx-foreign-session.patch`). Run against the same server while the second
+  client was still online, the patched core logged that error within 40 seconds. The app then marks
+  the server "Key in use on another device" for 30 minutes, writes it to the log and, with
+  auto-switch on, moves to the next server. The phone log of 10 November ran the core at log level
+  warn, so it cannot show which of the two keys had a second user at the time.
 
 ## Building from source
 

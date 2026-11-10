@@ -1,0 +1,110 @@
+diff --git a/device/device.go b/device/device.go
+index dec5f07..484131c 100644
+--- a/device/device.go
++++ b/device/device.go
+@@ -167,6 +167,10 @@ type Device struct {
+ 		freshPort atomic.Bool
+ 		last      atomic.Int64 // unix seconds of the last rebind (debounce)
+ 	}
++
++	// lx (pelegram): data packets for a session this device never had,
++	// see lx_foreign_session.go.
++	foreignSession lxForeignSession
+ }
+ 
+ // deviceState represents the state of a Device.
+diff --git a/device/receive.go b/device/receive.go
+index 6d9994d..a934eae 100644
+--- a/device/receive.go
++++ b/device/receive.go
+@@ -227,6 +227,9 @@ func (device *Device) RoutineReceiveIncoming(
+ 				}
+ 				keypair := value.keypair
+ 				if keypair == nil {
++					// lx: data for a session this device never had: another
++					// client on the same key (lx_foreign_session.go)
++					device.noteForeignSession()
+ 					continue
+ 				}
+ 
+diff --git a/device/lx_foreign_session.go b/device/lx_foreign_session.go
+new file mode 100644
+index 0000000..d7257b0
+--- /dev/null
++++ b/device/lx_foreign_session.go
+@@ -0,0 +1,75 @@
++/* SPDX-License-Identifier: MIT
++ *
++ * lx (pelegram): foreign-session detector.
++ *
++ * A WireGuard server keeps one session and one endpoint per peer key. When a
++ * second client runs with the same private key, each handshake moves the
++ * server's current session to the client that made it, and each packet moves
++ * the endpoint to the client that sent it. The server then sends the other
++ * client's traffic, sealed for the other client's session, to this device.
++ * Such a datagram carries a receiver index this device never issued, and
++ * RoutineReceiveIncoming drops it silently: the tunnel goes dead about 20 s
++ * after every handshake and the log says nothing.
++ *
++ * The detector counts those datagrams and logs one error when they keep
++ * arriving while this device holds a live session of its own.
++ */
++
++package device
++
++import (
++	"sync/atomic"
++	"time"
++)
++
++const (
++	foreignSessionWindow    = 10 * time.Second
++	foreignSessionThreshold = 8
++	foreignSessionLogEvery  = 60 * time.Second
++)
++
++type lxForeignSession struct {
++	windowStart atomic.Int64 // unix nanoseconds
++	count       atomic.Int32
++	lastLog     atomic.Int64 // unix nanoseconds, 0 = never
++}
++
++// noteForeignSession is called for a datagram classified as transport whose
++// receiver index is not in the index table.
++func (device *Device) noteForeignSession() {
++	fs := &device.foreignSession
++	now := time.Now().UnixNano()
++	start := fs.windowStart.Load()
++	if now-start > int64(foreignSessionWindow) && fs.windowStart.CompareAndSwap(start, now) {
++		fs.count.Store(0)
++	}
++	n := fs.count.Add(1)
++	if n < foreignSessionThreshold {
++		return
++	}
++	last := fs.lastLog.Load()
++	if last != 0 && now-last < int64(foreignSessionLogEvery) {
++		return
++	}
++	if !device.hasLiveSession() || !fs.lastLog.CompareAndSwap(last, now) {
++		return
++	}
++	device.log.Errorf("Received %d data packets for a session this device does not have within %d seconds: another client is using the same private key",
++		n, int(foreignSessionWindow/time.Second))
++}
++
++// hasLiveSession reports whether any peer holds a current keypair that has
++// not expired. Only called once the threshold is reached.
++func (device *Device) hasLiveSession() bool {
++	device.peers.RLock()
++	defer device.peers.RUnlock()
++	for _, peer := range device.peers.keyMap {
++		peer.keypairs.RLock()
++		current := peer.keypairs.current
++		peer.keypairs.RUnlock()
++		if current != nil && sinceIncludingSleep(current.created) < device.keychainExpireTime() {
++			return true
++		}
++	}
++	return false
++}

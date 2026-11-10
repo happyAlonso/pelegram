@@ -17,6 +17,8 @@ public class VpnKeyInfo {
     public long lastFailedElapsed;
     /** elapsedRealtime of the last ping it answered or traffic it carried, 0 if never in this process. */
     public long lastWorkedElapsed;
+    /** elapsedRealtime when the core saw another client on this key, 0 if never in this process. */
+    public long keyInUseElsewhereElapsed;
 
     public VpnKeyInfo(String name, String key) {
         this.name = name;

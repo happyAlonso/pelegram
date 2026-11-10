@@ -408,6 +408,8 @@ public class VpnController implements SingBoxManager.StateListener {
         silentBackgroundTicks = 0;
         backgroundPingsWithoutTraffic = 0; // deliberate user action, so drop the outage backoff too
         trialAfterConnect = false;
+        // A fresh try: the core reports the other device again within a minute if it is still on the key
+        info.keyInUseElsewhereElapsed = 0;
         save();
         notifyList();
         if (enabled) {
@@ -681,6 +683,45 @@ public class VpnController implements SingBoxManager.StateListener {
             startTrial();
             trialAfterNetworkChange = true;
         }
+    }
+
+    /**
+     * The core saw data for another client's session on the current key. A WireGuard or AmneziaWG
+     * server keeps one session per key, so two devices on one key keep taking it from each other:
+     * on 10 November an AWG 3.1 key carried traffic for about 20 s after each handshake, then
+     * nothing until the next one. No setting on this side fixes that, the key needs to be used on
+     * one device only. Called from the core log thread.
+     */
+    public static void onKeyInUseElsewhere() {
+        AndroidUtilities.runOnUIThread(() -> {
+            VpnController controller = instance;
+            if (controller != null) {
+                controller.handleKeyInUseElsewhere();
+            }
+        });
+    }
+
+    private void handleKeyInUseElsewhere() {
+        if (!enabled || currentVpn == null) {
+            return;
+        }
+        currentVpn.keyInUseElsewhereElapsed = SystemClock.elapsedRealtime();
+        boolean canSwitch = autoSwitch && vpnList.size() > 1;
+        if (BuildVars.LOGS_ENABLED) {
+            FileLog.d("VpnController: another device uses the key of '" + currentVpn.getDisplayName()
+                    + "' at the same time, the server sends this tunnel's traffic to it"
+                    + (canSwitch ? " - auto-switching to next server" : ""));
+        }
+        notifyList();
+        if (canSwitch) {
+            switchToNext();
+        }
+    }
+
+    /** Whether the core reported another client on this key within the last {@link #FAILED_SERVER_SKIP_MS}. */
+    public static boolean isKeyInUseElsewhere(VpnKeyInfo info) {
+        return info.keyInUseElsewhereElapsed != 0
+                && SystemClock.elapsedRealtime() - info.keyInUseElsewhereElapsed < FAILED_SERVER_SKIP_MS;
     }
 
     /**

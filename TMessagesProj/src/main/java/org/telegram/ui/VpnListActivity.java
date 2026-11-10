@@ -396,7 +396,11 @@ public class VpnListActivity extends BaseFragment implements VpnController.Liste
         public void updateStatus() {
             VpnController c = VpnController.getInstance();
             int colorKey;
-            if (currentInfo == c.currentVpn && c.isEnabled()) {
+            if (VpnController.isKeyInUseElsewhere(currentInfo)) {
+                // The server hands this key's traffic to another device, see VpnController.onKeyInUseElsewhere
+                colorKey = Theme.key_text_RedRegular;
+                valueTextView.setText(getString(R.string.VpnKeyInUseElsewhere));
+            } else if (currentInfo == c.currentVpn && c.isEnabled()) {
                 int state = c.getState();
                 if (state == SingBoxManager.STATE_CONNECTED) {
                     colorKey = Theme.key_windowBackgroundWhiteBlueText6;

@@ -69,6 +69,13 @@ final class SingBoxLogClient implements CommandClientHandler {
     // were ~1 line per proxied connection and dominated the app log. Warn/error still come through.
     private static final int LEVEL_INFO = 4;
 
+    /**
+     * Logged (lower-cased) by pelegram's patch to the core's WireGuard device when data packets for
+     * a session it never had keep arriving: a second client runs with the same private key, see
+     * patches/wireguard-go-lx-foreign-session.patch.
+     */
+    private static final String KEY_IN_USE_ELSEWHERE = "another client is using the same private key";
+
     @Override
     public void writeLogs(LogIterator it) {
         try {
@@ -77,7 +84,11 @@ final class SingBoxLogClient implements CommandClientHandler {
                 if (e.getLevel() >= LEVEL_INFO) {
                     continue;
                 }
-                FileLog.d("singbox-core: " + e.getMessage());
+                String message = e.getMessage();
+                FileLog.d("singbox-core: " + message);
+                if (message != null && message.contains(KEY_IN_USE_ELSEWHERE)) {
+                    VpnController.onKeyInUseElsewhere();
+                }
             }
         } catch (Throwable ignored) {
         }
