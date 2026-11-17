@@ -11,6 +11,8 @@ import libbox.DnsQuery;
 import libbox.Libbox;
 import libbox.LogEntry;
 import libbox.LogIterator;
+import libbox.OutboundGroup;
+import libbox.OutboundGroupItem;
 import libbox.OutboundGroupItemIterator;
 import libbox.OutboundGroupIterator;
 import libbox.StatusMessage;
@@ -25,6 +27,12 @@ import libbox.StringIterator;
 final class SingBoxLogClient implements CommandClientHandler {
     private volatile CommandClient client;
     private volatile boolean stopped;
+    /** The core start this client belongs to; group events are tagged with it. */
+    private final SingBoxManager.Session session;
+
+    SingBoxLogClient(SingBoxManager.Session session) {
+        this.session = session;
+    }
 
     /** Connects on a background thread, retrying briefly until the command server is listening. */
     void start() {
@@ -34,6 +42,10 @@ final class SingBoxLogClient implements CommandClientHandler {
                 try {
                     CommandClientOptions options = new CommandClientOptions();
                     options.addCommand(Libbox.CommandLog);
+                    if (session.sub != null) {
+                        // pushed by the core whenever a server's test result changes, no polling
+                        options.addCommand(Libbox.CommandGroup);
+                    }
                     options.setStatusInterval(2_000_000_000L);
                     CommandClient c = new CommandClient(this, options);
                     c.connect();
@@ -48,8 +60,46 @@ final class SingBoxLogClient implements CommandClientHandler {
                     }
                 }
             }
+            if (!stopped) {
+                FileLog.e("singbox-core: log client could not connect, no core log"
+                        + (session.sub != null ? " and no server status for this session" : ""));
+            }
         }, "singbox-log");
         t.start();
+    }
+
+    boolean isConnected() {
+        return client != null;
+    }
+
+    /** Points a selector group at one of its outbounds. Blocking; call off the UI thread. */
+    void selectOutbound(String groupTag, String outboundTag) {
+        CommandClient c = client;
+        if (c == null) {
+            FileLog.e("singbox-core: server not switched, the log client is not connected");
+            return;
+        }
+        try {
+            c.selectOutbound(groupTag, outboundTag);
+            FileLog.d("singbox-core: selector now on " + outboundTag);
+        } catch (Throwable e) {
+            FileLog.e("singbox-core: switching the server failed: " + e);
+        }
+    }
+
+    /** Asks the core to test every member of the group now. Blocking; call off the UI thread. */
+    void urlTest(String groupTag) {
+        CommandClient c = client;
+        if (c == null) {
+            FileLog.d("singbox-core: server test not requested, the log client is not connected");
+            return;
+        }
+        try {
+            c.urlTest(groupTag);
+            FileLog.d("singbox-core: asked the group to test every server now");
+        } catch (Throwable e) {
+            FileLog.e("singbox-core: server test request failed: " + e);
+        }
     }
 
     void stop() {
@@ -115,7 +165,50 @@ final class SingBoxLogClient implements CommandClientHandler {
     @Override public void setDefaultLogLevel(int level) {}
     @Override public void updateClashMode(String newMode) {}
     @Override public void writeConnectionEvents(ConnectionEvents events) {}
-    @Override public void writeGroups(OutboundGroupIterator message) {}
+    /**
+     * The group's state from the core, on a gomobile thread. Copied into plain objects here (the
+     * iterator is only valid during the call) and handed to the controller, which drops it if this
+     * session is no longer the running one. A member whose last test failed has delay 0 and test
+     * time 0, the same as one never tested; "tested" tells the two apart once any test is done.
+     */
+    @Override
+    public void writeGroups(OutboundGroupIterator it) {
+        try {
+            VpnSubscription.GroupStatus status = new VpnSubscription.GroupStatus();
+            status.members.addAll(session.tagNames.values());
+            String selectorChoice = null;
+            boolean seen = false;
+            while (it != null && it.hasNext()) {
+                OutboundGroup group = it.next();
+                if (SingBoxConfigBuilder.TAG_PROXY.equals(group.getTag())) {
+                    selectorChoice = group.getSelected(); // "auto" or a server tag
+                    seen = true;
+                } else if (SingBoxConfigBuilder.GROUP_AUTO_TAG.equals(group.getTag())) {
+                    status.fastestName = session.tagNames.get(group.getSelected());
+                    OutboundGroupItemIterator items = group.getItems();
+                    while (items != null && items.hasNext()) {
+                        OutboundGroupItem item = items.next();
+                        String name = session.tagNames.get(item.getTag());
+                        if (item.getURLTestTime() > 0) {
+                            status.tested = true;
+                        }
+                        if (name != null && item.getURLTestDelay() > 0) {
+                            status.delays.put(name, item.getURLTestDelay());
+                        }
+                    }
+                    seen = true;
+                }
+            }
+            if (!seen) {
+                return;
+            }
+            status.pinned = selectorChoice != null && !SingBoxConfigBuilder.GROUP_AUTO_TAG.equals(selectorChoice);
+            status.selectedName = status.pinned ? session.tagNames.get(selectorChoice) : status.fastestName;
+            VpnController.onGroupStatus(session, status);
+        } catch (Throwable e) {
+            FileLog.e(e);
+        }
+    }
     @Override public void writeOutbounds(OutboundGroupItemIterator message) {}
     @Override public void writeStatus(StatusMessage message) {}
     @Override public void writeDNSQuery(DnsQuery query) {}

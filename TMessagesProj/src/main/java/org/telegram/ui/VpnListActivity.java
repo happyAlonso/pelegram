@@ -32,6 +32,7 @@ import org.telegram.messenger.R;
 import org.telegram.messenger.vpn.SingBoxManager;
 import org.telegram.messenger.vpn.VpnController;
 import org.telegram.messenger.vpn.VpnKeyInfo;
+import org.telegram.messenger.vpn.VpnSubscription;
 import org.telegram.ui.ActionBar.ActionBar;
 import org.telegram.ui.ActionBar.ActionBarMenu;
 import org.telegram.ui.ActionBar.ActionBarMenuItem;
@@ -63,6 +64,11 @@ public class VpnListActivity extends BaseFragment implements VpnController.Liste
     private ActionBarMenuItem shareMenuItem;
     private ActionBarMenuItem deleteMenuItem;
     private final List<VpnKeyInfo> selectedItems = new ArrayList<>();
+    /**
+     * The connection rows, a copy of VpnController.vpnList taken in updateRows. A subscription is
+     * one entry there (VpnKeyInfo.sub set), so it is one row here.
+     */
+    private final ArrayList<VpnKeyInfo> rows = new ArrayList<>();
 
     private int rowCount;
     @Keep private int useVpnRow;
@@ -93,6 +99,8 @@ public class VpnListActivity extends BaseFragment implements VpnController.Liste
 
     private static final int PAYLOAD_SELECTION_CHANGED = 0;
     private static final int PAYLOAD_SELECTION_MODE_CHANGED = 1;
+    /** Only the status line changed (subscription test results): rebind it in place, no cross-fade. */
+    private static final int PAYLOAD_STATUS = 2;
 
     @Override
     public boolean onFragmentCreate() {
@@ -204,9 +212,13 @@ public class VpnListActivity extends BaseFragment implements VpnController.Liste
                 listAdapter.toggleSelected(position);
                 return;
             }
-            VpnKeyInfo info = c.vpnList.get(position - vpnStartRow);
+            VpnKeyInfo info = rows.get(position - vpnStartRow);
+            // selectVpn reconnects when the VPN is already on, and setEnabled(true) reconnects too:
+            // calling both started the core twice per tap, the first instance living ~80 ms.
             c.selectVpn(info);
-            c.setEnabled(true);
+            if (!c.isEnabled()) {
+                c.setEnabled(true);
+            }
             updateRows(true);
         }
     }
@@ -221,7 +233,7 @@ public class VpnListActivity extends BaseFragment implements VpnController.Liste
         builder.setNegativeButton(getString(R.string.Cancel), null);
         builder.setPositiveButton(getString(R.string.Delete), (dialog, which) -> {
             for (VpnKeyInfo info : new ArrayList<>(selectedItems)) {
-                VpnController.getInstance().deleteVpn(info);
+                VpnController.getInstance().deleteVpn(info); // a subscription entry takes the subscription with it
             }
             if (listAdapter != null) {
                 listAdapter.clearSelected();
@@ -245,7 +257,8 @@ public class VpnListActivity extends BaseFragment implements VpnController.Liste
             if (keys.length() > 0) {
                 keys.append("\n\n");
             }
-            keys.append(info.key);
+            // a subscription is shared as its link, which gives the other person the same list
+            keys.append(info.sub != null ? info.sub.url : info.key);
         }
         Intent shareIntent = new Intent(Intent.ACTION_SEND);
         shareIntent.setType("text/plain");
@@ -294,9 +307,15 @@ public class VpnListActivity extends BaseFragment implements VpnController.Liste
         // when the VPN is on, routeCallsInfoRow is the section footer; otherwise a plain shadow is.
         useVpnShadowRow = c.isEnabled() ? -1 : rowCount++;
         connectionsHeaderRow = rowCount++;
-        if (!c.vpnList.isEmpty()) {
+        rows.clear();
+        rows.addAll(c.vpnList);
+        // drop selected rows that are gone
+        if (selectedItems.retainAll(rows) && selectedItems.isEmpty() && actionBar != null && actionBar.isActionModeShowed()) {
+            actionBar.hideActionMode();
+        }
+        if (!rows.isEmpty()) {
             vpnStartRow = rowCount;
-            rowCount += c.vpnList.size();
+            rowCount += rows.size();
             vpnEndRow = rowCount;
         } else {
             vpnStartRow = -1;
@@ -325,6 +344,16 @@ public class VpnListActivity extends BaseFragment implements VpnController.Liste
         });
     }
 
+    /** Only the connection rows show test results; the auto-switch slider must not be rebound mid-drag. */
+    @Override
+    public void onVpnGroupStatusChanged() {
+        AndroidUtilities.runOnUIThread(() -> {
+            if (listAdapter != null && vpnStartRow >= 0) {
+                listAdapter.notifyItemRangeChanged(vpnStartRow, vpnEndRow - vpnStartRow, PAYLOAD_STATUS);
+            }
+        });
+    }
+
     private class VpnDetailCell extends FrameLayout {
 
         private final TextView textView;
@@ -332,6 +361,8 @@ public class VpnListActivity extends BaseFragment implements VpnController.Liste
         private final ImageView checkImageView;
         private final CheckBox2 checkBox;
         private VpnKeyInfo currentInfo;
+        /** Set when the row stands for a subscription; currentInfo is then null. */
+        private VpnSubscription currentSub;
         private Drawable checkDrawable;
         private boolean isSelected;
         private boolean isSelectionEnabled;
@@ -368,7 +399,11 @@ public class VpnListActivity extends BaseFragment implements VpnController.Liste
             checkImageView.setContentDescription(getString(R.string.Edit));
             addView(checkImageView, LayoutHelper.createFrame(54, 54, (LocaleController.isRTL ? Gravity.LEFT : Gravity.RIGHT) | Gravity.CENTER_VERTICAL, 4, 0, 6, 0));
             checkImageView.setOnClickListener(v -> {
-                if (currentInfo != null) {
+                if (currentSub != null) {
+                    // its servers come from the link and the next update would undo an edit,
+                    // so a subscription opens its own screen instead of the key editor
+                    presentFragment(new VpnSubscriptionActivity(currentSub));
+                } else if (currentInfo != null) {
                     presentFragment(new VpnSettingsActivity(currentInfo));
                 }
             });
@@ -389,11 +424,19 @@ public class VpnListActivity extends BaseFragment implements VpnController.Liste
 
         public void setInfo(VpnKeyInfo info) {
             currentInfo = info;
+            currentSub = info.sub;
             textView.setText(info.getDisplayName());
             updateStatus();
         }
 
         public void updateStatus() {
+            if (currentSub != null) {
+                updateSubscriptionStatus();
+                return;
+            }
+            if (currentInfo == null) {
+                return;
+            }
             VpnController c = VpnController.getInstance();
             int colorKey;
             if (VpnController.isKeyInUseElsewhere(currentInfo)) {
@@ -420,6 +463,50 @@ public class VpnListActivity extends BaseFragment implements VpnController.Liste
                 colorKey = Theme.key_windowBackgroundWhiteGrayText2;
                 valueTextView.setText(currentInfo.getType());
             }
+            color = Theme.getColor(colorKey);
+            valueTextView.setTextColor(color);
+            if (checkDrawable != null) {
+                checkDrawable.setColorFilter(new PorterDuffColorFilter(color, PorterDuff.Mode.MULTIPLY));
+            }
+        }
+
+        /**
+         * In use: the tunnel state and ping like a key, then the server the group picked ("checking
+         * servers" until the first test is done). Otherwise "Subscription, 49 servers".
+         */
+        private void updateSubscriptionStatus() {
+            VpnController c = VpnController.getInstance();
+            int colorKey;
+            String text;
+            if (currentInfo == c.currentVpn && c.isEnabled()) {
+                int state = c.getState();
+                if (state == SingBoxManager.STATE_CONNECTED) {
+                    colorKey = Theme.key_windowBackgroundWhiteBlueText6;
+                    text = currentInfo.ping != 0
+                            ? getString(R.string.Connected) + ", " + LocaleController.formatString("Ping", R.string.Ping, currentInfo.ping)
+                            : getString(R.string.Connected);
+                    VpnSubscription.GroupStatus status = currentSub.groupStatus;
+                    if (status == null || !status.tested || status.selectedName == null) {
+                        text += ", " + getString(R.string.VpnSubscriptionChecking);
+                    } else {
+                        text += ", " + status.selectedName;
+                    }
+                } else if (state == SingBoxManager.STATE_ERROR) {
+                    colorKey = Theme.key_text_RedRegular;
+                    text = getString(R.string.Unavailable);
+                } else {
+                    colorKey = Theme.key_windowBackgroundWhiteGrayText2;
+                    text = getString(R.string.Connecting);
+                }
+            } else if (currentSub.fetching) {
+                colorKey = Theme.key_windowBackgroundWhiteGrayText2;
+                text = getString(R.string.VpnSubscriptionUpdating);
+            } else {
+                int servers = currentSub.includedServers().size();
+                colorKey = servers == 0 || currentSub.lastError != null ? Theme.key_text_RedRegular : Theme.key_windowBackgroundWhiteGrayText2;
+                text = LocaleController.formatString(R.string.VpnSubscriptionServers, servers);
+            }
+            valueTextView.setText(text);
             color = Theme.getColor(colorKey);
             valueTextView.setTextColor(color);
             if (checkDrawable != null) {
@@ -538,7 +625,7 @@ public class VpnListActivity extends BaseFragment implements VpnController.Liste
             if (position < vpnStartRow || vpnStartRow < 0 || position >= vpnEndRow) {
                 return;
             }
-            VpnKeyInfo info = VpnController.getInstance().vpnList.get(position - vpnStartRow);
+            VpnKeyInfo info = rows.get(position - vpnStartRow);
             if (selectedItems.contains(info)) {
                 selectedItems.remove(info);
             } else {
@@ -686,7 +773,7 @@ public class VpnListActivity extends BaseFragment implements VpnController.Liste
                 }
                 case VIEW_TYPE_DETAIL: {
                     VpnDetailCell cell = (VpnDetailCell) holder.itemView;
-                    VpnKeyInfo info = c.vpnList.get(position - vpnStartRow);
+                    VpnKeyInfo info = rows.get(position - vpnStartRow);
                     cell.setInfo(info);
                     cell.setChecked(c.currentVpn == info);
                     cell.setItemSelected(selectedItems.contains(info), false);
@@ -708,12 +795,15 @@ public class VpnListActivity extends BaseFragment implements VpnController.Liste
         public void onBindViewHolder(@NonNull RecyclerView.ViewHolder holder, int position, @NonNull List payloads) {
             if (holder.getItemViewType() == VIEW_TYPE_DETAIL && !payloads.isEmpty()) {
                 VpnDetailCell cell = (VpnDetailCell) holder.itemView;
-                VpnKeyInfo info = VpnController.getInstance().vpnList.get(position - vpnStartRow);
+                VpnKeyInfo info = rows.get(position - vpnStartRow);
                 if (payloads.contains(PAYLOAD_SELECTION_CHANGED)) {
                     cell.setItemSelected(selectedItems.contains(info), true);
                 }
                 if (payloads.contains(PAYLOAD_SELECTION_MODE_CHANGED)) {
                     cell.setSelectionEnabled(!selectedItems.isEmpty(), true);
+                }
+                if (payloads.contains(PAYLOAD_STATUS)) {
+                    cell.updateStatus();
                 }
             } else {
                 super.onBindViewHolder(holder, position, payloads);

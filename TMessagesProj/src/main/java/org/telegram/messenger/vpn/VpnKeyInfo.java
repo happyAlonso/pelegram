@@ -7,6 +7,12 @@ public class VpnKeyInfo {
 
     public String name;
     public String key;   // raw URI: vpn:// / vless:// / hysteria2:// / ss:// / awg .conf
+    /**
+     * Set on the one list entry that stands for a subscription; null for a key. For such an entry
+     * {@link #key} only mirrors the first server the group uses, so an older build that reads the
+     * saved list still finds a valid key. The core is started from the subscription, not from it.
+     */
+    public VpnSubscription sub;
 
     // runtime status (not persisted)
     public boolean checking;
@@ -27,6 +33,9 @@ public class VpnKeyInfo {
 
     /** Human-readable protocol label derived from the key. */
     public String getType() {
+        if (sub != null) {
+            return "Subscription";
+        }
         if (key == null) {
             return "VPN";
         }
@@ -61,6 +70,9 @@ public class VpnKeyInfo {
     }
 
     public String getDisplayName() {
+        if (sub != null) {
+            return sub.getDisplayName();
+        }
         if (!TextUtils.isEmpty(name)) {
             return name;
         }

@@ -15,8 +15,10 @@ import java.net.InetAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.zip.Inflater;
 
 /**
@@ -70,6 +72,163 @@ public class SingBoxConfigBuilder {
         // resolver (which works - it's what the browser/Outline use) and hand the core an IP.
         resolveServerAddresses(outbound);
 
+        JSONObject root = skeleton(localPort, !tunnelCarriesIpv6(outbound));
+        // wireguard (incl. AmneziaWG) is an `endpoint`, not an `outbound`, in current sing-box.
+        if ("wireguard".equals(outbound.optString("type"))) {
+            // Applied here rather than in the parsers so it covers every key format: awg-quick
+            // text, an AmneziaVPN vpn:// blob (which carries its own mtu) and a pasted outbound.
+            int mtu = outbound.optInt("mtu", MAX_TUNNEL_MTU);
+            if (mtu <= 0 || mtu > MAX_TUNNEL_MTU) {
+                outbound.put("mtu", MAX_TUNNEL_MTU);
+            }
+            // Bound how long a TCP connect through the tunnel may hang. The wireguard endpoint dials
+            // inside its own userspace network stack, which takes its deadline from the caller, and no
+            // caller sets one - so an address the VPN server cannot reach is retried by that stack's
+            // own SYN schedule until it exhausts, 2m7s later. A user log showed 1487 of those to a
+            // single dead Telegram media address in 30h, 63 of them in flight at once, each one a
+            // stream of encrypted UDP retransmits keeping the radio out of its idle state. tgnet gives
+            // up on its own socket after 8-12s (Connection::connect), so anything past that is spent
+            // on a connection nobody is waiting for any more.
+            outbound.put("connect_timeout", TUNNEL_CONNECT_TIMEOUT);
+            root.put("endpoints", new JSONArray().put(outbound));
+            root.put("outbounds", new JSONArray().put(directOutbound()));
+        } else {
+            root.put("outbounds", new JSONArray().put(outbound).put(directOutbound()));
+        }
+        return root.toString();
+    }
+
+    /** Tag of the urltest group inside a subscription's selector ({@link #TAG_PROXY}). */
+    public static final String GROUP_AUTO_TAG = "auto";
+    /** Probe target of the subscription group, sing-box's own default. */
+    private static final String GROUP_TEST_URL = "https://www.gstatic.com/generate_204";
+    /**
+     * The group leaves its current server only for one that is faster by more than this. The
+     * router's xray balancer has no such hold and moved Frankfurt -> London on a 44 ms difference
+     * (home_rtr notes, 2026-11-16), and every move can change the exit country of new connections.
+     */
+    private static final int GROUP_TOLERANCE_MS = 100;
+
+    /**
+     * The config for a subscription: one outbound per server (tags s00, s01, ... by position in
+     * {@code servers}), a urltest group {@link #GROUP_AUTO_TAG} over them, and a selector tagged
+     * {@link #TAG_PROXY} over "auto" and every server, so the route and the DNS detour need no
+     * change. The selector starts on the server named {@code pinnedName} if there is one, else on
+     * "auto". The urltest group tests every server through {@link #GROUP_TEST_URL} every
+     * {@code intervalSec} seconds while it carries traffic and sends new connections through the
+     * fastest; before the first test finishes it uses the first server. Fills {@code tagNames} with
+     * tag -> server name, which maps the core's group status back to the servers.
+     *
+     * A server whose host does not resolve is left out rather than failing the whole build (its
+     * hostname would have to be resolved through the group itself). If no host resolves, all stay
+     * as host names and the core reports the failure, as it does for a single key.
+     */
+    public static String buildGroup(List<VpnKeyInfo> servers, int localPort, int intervalSec, Map<String, String> tagNames,
+                                    int[] unresolvedOut, String pinnedName) throws Exception {
+        if (servers.isEmpty()) {
+            throw new IllegalStateException("every server of the subscription is excluded");
+        }
+        HashMap<String, String> resolved = new HashMap<>();
+        List<JSONObject> ready = new ArrayList<>();
+        List<JSONObject> unresolved = new ArrayList<>();
+        HashMap<String, String> readyNames = new HashMap<>();
+        HashMap<String, String> allNames = new HashMap<>();
+        for (int i = 0; i < servers.size(); i++) {
+            VpnKeyInfo server = servers.get(i);
+            JSONObject o;
+            try {
+                o = buildOutbound(server.key);
+            } catch (Exception e) {
+                continue;
+            }
+            if ("wireguard".equals(o.optString("type"))) {
+                continue; // an endpoint, not an outbound: it cannot be a group member
+            }
+            String tag = String.format(Locale.ROOT, "s%02d", i);
+            o.put("tag", tag);
+            allNames.put(tag, server.name);
+            String host = o.optString("server", "");
+            String ip = resolved.get(host);
+            if (ip == null) {
+                ip = resolveHost(host);
+                resolved.put(host, ip);
+            }
+            if (TextUtils.isEmpty(ip) || !isNumericAddress(ip)) {
+                unresolved.add(o);
+                continue;
+            }
+            o.put("server", ip);
+            ready.add(o);
+            readyNames.put(tag, server.name);
+        }
+        if (ready.isEmpty()) {
+            ready = unresolved;
+            readyNames = allNames;
+        } else {
+            unresolvedOut[0] = unresolved.size(); // VpnController restarts the group to try them again
+        }
+        if (ready.isEmpty()) {
+            throw new IllegalStateException("no server of the subscription could be read");
+        }
+        tagNames.putAll(readyNames);
+        JSONArray outbounds = new JSONArray();
+        JSONArray members = new JSONArray();
+        for (JSONObject o : ready) {
+            outbounds.put(o);
+            members.put(o.getString("tag"));
+        }
+        JSONObject auto = new JSONObject();
+        auto.put("type", "urltest");
+        auto.put("tag", GROUP_AUTO_TAG);
+        auto.put("outbounds", members);
+        auto.put("url", GROUP_TEST_URL);
+        auto.put("interval", intervalSec + "s");
+        auto.put("tolerance", GROUP_TOLERANCE_MS);
+        // The core refuses to start when interval > idle_timeout (checked at start, not in checkConfig).
+        auto.put("idle_timeout", Math.max(1800, 2 * intervalSec) + "s");
+        // Open connections stay on their server when the group picks another; only new dials move.
+        auto.put("interrupt_exist_connections", false);
+        outbounds.put(auto);
+        // On top a selector: "auto" (the fastest) or one server the user picked in the submenu.
+        // SingBoxManager.selectServer switches it in the running core, without a restart.
+        String defaultTag = GROUP_AUTO_TAG;
+        if (pinnedName != null) {
+            for (JSONObject o : ready) {
+                if (pinnedName.equals(tagNames.get(o.getString("tag")))) {
+                    defaultTag = o.getString("tag");
+                    break;
+                }
+            }
+        }
+        JSONArray choices = new JSONArray().put(GROUP_AUTO_TAG);
+        for (int i = 0; i < members.length(); i++) {
+            choices.put(members.getString(i));
+        }
+        JSONObject selector = new JSONObject();
+        selector.put("type", "selector");
+        selector.put("tag", TAG_PROXY);
+        selector.put("outbounds", choices);
+        selector.put("default", defaultTag);
+        // A pick (or going back to the fastest) closes the connections through the old server, so
+        // Telegram reconnects through the new one at once; otherwise its long-lived connections
+        // would stay where they were. The urltest group below keeps them open on its own switches.
+        selector.put("interrupt_exist_connections", true);
+        outbounds.put(selector);
+        outbounds.put(directOutbound());
+        JSONObject root = skeleton(localPort, true);
+        root.put("outbounds", outbounds);
+        return root.toString();
+    }
+
+    private static JSONObject directOutbound() throws JSONException {
+        JSONObject direct = new JSONObject();
+        direct.put("type", "direct");
+        direct.put("tag", "direct");
+        return direct;
+    }
+
+    /** Everything but the outbounds: log, DNS, the local mixed inbound and the route to {@link #TAG_PROXY}. */
+    private static JSONObject skeleton(int localPort, boolean rejectIpv6) throws JSONException {
         // "mixed" serves BOTH SOCKS5 and HTTP CONNECT on the one port: tgnet uses the SOCKS side, while
         // routed calls use the HTTP side (webrtc can only proxy over HTTP CONNECT, not SOCKS).
         JSONObject socksIn = new JSONObject();
@@ -77,10 +236,6 @@ public class SingBoxConfigBuilder {
         socksIn.put("tag", TAG_SOCKS_IN);
         socksIn.put("listen", "127.0.0.1");
         socksIn.put("listen_port", localPort);
-
-        JSONObject direct = new JSONObject();
-        direct.put("type", "direct");
-        direct.put("tag", "direct");
 
         JSONObject route = new JSONObject();
         // Everything from the socks inbound leaves via the proxy outbound/endpoint (by tag).
@@ -91,11 +246,11 @@ public class SingBoxConfigBuilder {
         // server had nowhere to send it. A rejected connect comes back in milliseconds and tgnet
         // moves to the next address. Only a wireguard endpoint with an IPv6 interface address can
         // carry IPv6 and is left alone. DNS is ipv4_only above, so nothing legitimate asks for it.
-        if (!tunnelCarriesIpv6(outbound)) {
-            JSONObject rejectIpv6 = new JSONObject();
-            rejectIpv6.put("ip_cidr", new JSONArray().put("::/0"));
-            rejectIpv6.put("action", "reject");
-            route.put("rules", new JSONArray().put(rejectIpv6));
+        if (rejectIpv6) {
+            JSONObject rejectRule = new JSONObject();
+            rejectRule.put("ip_cidr", new JSONArray().put("::/0"));
+            rejectRule.put("action", "reject");
+            route.put("rules", new JSONArray().put(rejectRule));
         }
 
         // DNS: the core's Android default resolver points at a dead local :53, so any traffic where the
@@ -127,30 +282,8 @@ public class SingBoxConfigBuilder {
         root.put("log", log);
         root.put("dns", dns);
         root.put("inbounds", new JSONArray().put(socksIn));
-        // wireguard (incl. AmneziaWG) is an `endpoint`, not an `outbound`, in current sing-box.
-        if ("wireguard".equals(outbound.optString("type"))) {
-            // Applied here rather than in the parsers so it covers every key format: awg-quick
-            // text, an AmneziaVPN vpn:// blob (which carries its own mtu) and a pasted outbound.
-            int mtu = outbound.optInt("mtu", MAX_TUNNEL_MTU);
-            if (mtu <= 0 || mtu > MAX_TUNNEL_MTU) {
-                outbound.put("mtu", MAX_TUNNEL_MTU);
-            }
-            // Bound how long a TCP connect through the tunnel may hang. The wireguard endpoint dials
-            // inside its own userspace network stack, which takes its deadline from the caller, and no
-            // caller sets one - so an address the VPN server cannot reach is retried by that stack's
-            // own SYN schedule until it exhausts, 2m7s later. A user log showed 1487 of those to a
-            // single dead Telegram media address in 30h, 63 of them in flight at once, each one a
-            // stream of encrypted UDP retransmits keeping the radio out of its idle state. tgnet gives
-            // up on its own socket after 8-12s (Connection::connect), so anything past that is spent
-            // on a connection nobody is waiting for any more.
-            outbound.put("connect_timeout", TUNNEL_CONNECT_TIMEOUT);
-            root.put("endpoints", new JSONArray().put(outbound));
-            root.put("outbounds", new JSONArray().put(direct));
-        } else {
-            root.put("outbounds", new JSONArray().put(outbound).put(direct));
-        }
         root.put("route", route);
-        return root.toString();
+        return root;
     }
 
     /** True only for a wireguard/AmneziaWG endpoint whose interface has an IPv6 address. */

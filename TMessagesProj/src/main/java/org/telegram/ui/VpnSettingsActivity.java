@@ -22,12 +22,15 @@ import android.widget.Toast;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.telegram.messenger.AndroidUtilities;
+import org.telegram.messenger.ApplicationLoader;
 import org.telegram.messenger.FileLog;
 import org.telegram.messenger.LocaleController;
 import org.telegram.messenger.R;
 import org.telegram.messenger.vpn.SingBoxConfigBuilder;
 import org.telegram.messenger.vpn.VpnController;
 import org.telegram.messenger.vpn.VpnKeyInfo;
+import org.telegram.messenger.vpn.VpnSubscription;
+import org.telegram.messenger.vpn.VpnSubscriptionParser;
 import org.telegram.ui.ActionBar.ActionBar;
 import org.telegram.ui.ActionBar.ActionBarMenuItem;
 import org.telegram.ui.ActionBar.AlertDialog;
@@ -385,6 +388,19 @@ public class VpnSettingsActivity extends BaseFragment {
         String pasted = rawKeyField.getText().toString();
         List<String> keys = SingBoxConfigBuilder.extractKeys(pasted);
         FileLog.d("VpnSettings: pasted " + SingBoxConfigBuilder.describePaste(pasted));
+        if (keys.isEmpty() && editingInfo == null) {
+            String url = VpnSubscriptionParser.findUrl(pasted);
+            if (url != null) {
+                addSubscription(url, name);
+                return;
+            }
+            // The body of a subscription pasted as it is (base64, or one key per line), for a user
+            // whose network blocks the subscription's domain and who got the body some other way.
+            VpnSubscriptionParser.Parsed body = VpnSubscriptionParser.parse(pasted);
+            if (body.error == null) {
+                keys = body.lines;
+            }
+        }
         if (keys.isEmpty()) {
             Toast.makeText(getParentActivity(), getString(R.string.VpnNoKeyFound), Toast.LENGTH_LONG).show();
             return;
@@ -419,6 +435,43 @@ public class VpnSettingsActivity extends BaseFragment {
             VpnController.getInstance().addVpns(added);
         }
         finishFragment();
+    }
+
+    private void addSubscription(String url, String name) {
+        if (!VpnSubscriptionParser.isHttps(url)) {
+            Toast.makeText(getParentActivity(), getString(R.string.VpnSubscriptionHttpsOnly), Toast.LENGTH_LONG).show();
+            return;
+        }
+        VpnController c = VpnController.getInstance();
+        VpnSubscription existing = c.findSubscriptionByUrl(url);
+        if (existing != null) {
+            if (!name.isEmpty()) {
+                c.renameSubscription(existing, name);
+            }
+            c.refreshSubscription(existing, true);
+            Toast.makeText(getParentActivity(), getString(R.string.VpnSubscriptionAlreadyAdded), Toast.LENGTH_LONG).show();
+            finishFragment();
+            return;
+        }
+        FileLog.d("VpnSettings: adding subscription " + VpnSubscriptionParser.maskUrl(url));
+        AlertDialog progress = new AlertDialog(getParentActivity(), AlertDialog.ALERT_TYPE_SPINNER);
+        progress.setCanCancel(false);
+        progress.show();
+        c.addSubscription(url, name, (sub, error, servers) -> {
+            try {
+                progress.dismiss();
+            } catch (Exception ignored) {
+            }
+            Context ctx = ApplicationLoader.applicationContext;
+            if (error != null) {
+                Toast.makeText(ctx, LocaleController.formatString(R.string.VpnSubscriptionAddFailed, error), Toast.LENGTH_LONG).show();
+                return;
+            }
+            Toast.makeText(ctx, LocaleController.formatString(R.string.VpnSubscriptionAdded, servers), Toast.LENGTH_SHORT).show();
+            if (getParentActivity() != null && !isFinishing()) {
+                finishFragment();
+            }
+        });
     }
 
     // ---- config <-> editable fields ----

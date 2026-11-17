@@ -4,6 +4,7 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.os.SystemClock;
 import android.text.TextUtils;
+import android.widget.Toast;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -11,15 +12,23 @@ import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.ApplicationLoader;
 import org.telegram.messenger.BuildVars;
 import org.telegram.messenger.FileLog;
+import org.telegram.messenger.LocaleController;
 import org.telegram.messenger.MessagesController;
+import org.telegram.messenger.R;
 import org.telegram.messenger.UserConfig;
 import org.telegram.messenger.voip.VoIPService;
 import org.telegram.tgnet.ConnectionsManager;
+import org.telegram.tgnet.RequestTimeDelegate;
 import org.telegram.utils.proxy.ProxySettings;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Owns the saved VPN keys, the "use VPN" / "auto-switch" flags and timeout, and the selection, and
@@ -75,6 +84,15 @@ public class VpnController implements SingBoxManager.StateListener {
     public interface Listener {
         void onVpnListChanged();
         void onVpnStateChanged(int state, String message);
+
+        /**
+         * A running subscription's server test results changed. They arrive up to four times a
+         * second during a test round, so a screen should refresh only the rows that show them: a
+         * full notifyDataSetChanged recreates rows and cancels a slider drag in progress.
+         */
+        default void onVpnGroupStatusChanged() {
+            onVpnListChanged();
+        }
     }
 
     private static VpnController instance;
@@ -135,6 +153,13 @@ public class VpnController implements SingBoxManager.StateListener {
     private int trialStep = -1;
     /** Bumped whenever a trial starts or stops, so a late ping result cannot act on a newer trial. */
     private int trialGeneration;
+    /**
+     * Bumped on every core state event. A ping only counts if no event came between its start and its
+     * answer: tgnet keeps a proxy check that it already sent alive across a proxy close (the close
+     * handler compares connection tokens after Connection::onDisconnected has zeroed them) and redials
+     * the same local port, so the answer can come from the next key's core and was booked on this key.
+     */
+    private int pingToken;
     /** Set by {@link #switchToNext()} when the server it picked should get a trial once the core is up. */
     private boolean trialAfterConnect;
     /**
@@ -170,6 +195,15 @@ public class VpnController implements SingBoxManager.StateListener {
     private static final int PING_HEALTH = 1;  // health-check tick, counts towards a switch
     private static final int PING_TRIAL = 2;   // trial of a server auto-switch just moved to
     private static final String[] PING_PURPOSE_NAMES = {"connect", "health", "trial"};
+    /**
+     * How long a ping may stay unanswered before it counts as failed. tgnet reports -1 only for a
+     * check whose socket closed before the request went out; one that was sent and never answered
+     * (the SOCKS side accepts, the tunnel behind it is dead) stays open with no callback, so without
+     * a deadline a health check could never fail for such a server.
+     */
+    private static final long PING_TIMEOUT_MS = 30 * 1000L;
+    /** Result passed for a ping that hit {@link #PING_TIMEOUT_MS}; any negative result is a failure. */
+    private static final long PING_TIMED_OUT = -2;
 
     /**
      * Set by tgnet, on tgnet's own threads, whenever any bytes arrive from Telegram; cleared by each
@@ -211,6 +245,54 @@ public class VpnController implements SingBoxManager.StateListener {
     private static volatile int mediaStallsSinceProgress;
     private static volatile long lastMediaStallElapsed;
 
+    /** Subscription links. Their servers live in {@link #vpnList}, see {@link VpnSubscription}. */
+    public final ArrayList<VpnSubscription> subscriptions = new ArrayList<>();
+    /** How often a subscription is downloaded again, as the user asked. The header's own interval is ignored. */
+    private static final long SUBSCRIPTION_INTERVAL_MS = 60 * 60 * 1000L;
+    /** Retry delays after failed automatic updates, indexed by failures - 1; the last one repeats. */
+    private static final long[] SUBSCRIPTION_RETRY_MS = {5 * 60 * 1000L, 15 * 60 * 1000L, 60 * 60 * 1000L};
+    /** Floor for the check timer, so a due subscription that cannot go out (offline) is not polled in a loop. */
+    private static final long SUBSCRIPTION_MIN_CHECK_MS = 60 * 1000L;
+    /** First check after start: lets the core connect, so the download can go through the tunnel. */
+    private static final long SUBSCRIPTION_FIRST_CHECK_MS = 60 * 1000L;
+    private final ExecutorService subscriptionWorker = Executors.newSingleThreadExecutor(r -> new Thread(r, "vpn-subscription"));
+    private final Runnable subscriptionCheckRunnable = this::checkSubscriptionsDue;
+    /**
+     * Set by the first failed health ping of a subscription: the group was asked to test every server
+     * at once, and that failure was not counted. Cleared by a good ping and by every core start.
+     */
+    private boolean groupRetestRequested;
+    /** A restart of the running subscription waits for the call in progress to end. */
+    private boolean pendingRestart;
+    private static final long PENDING_RESTART_CHECK_MS = 30 * 1000L;
+    private final Runnable pendingRestartRunnable = this::runPendingRestart;
+    /** Slider and exclude edits restart the group once the user stops changing them. */
+    private static final long SETTINGS_RESTART_DELAY_MS = 1500L;
+    private VpnSubscription settingsChangedSub;
+    private final Runnable settingsRestartRunnable = this::applySettingsChange;
+    /**
+     * How long after a subscription's core starts its first test round is taken as finished. The
+     * core forgets a server whose test failed, so a round where nothing answered sends no result
+     * at all; without this the screens would say "checking" for good.
+     */
+    private static final long GROUP_FIRST_ROUND_MS = 20 * 1000L;
+    private final Runnable groupFirstRoundRunnable = this::checkGroupFirstRound;
+    /** A health tick this soon after a pick does not drop it (the pick re-arms the tick anyway). */
+    private static final long PIN_MIN_HOLD_MS = 5 * 1000L;
+    /** The selector switch runs on its own thread; ping after it, so the ping goes through the pick. */
+    private static final long PICK_PING_DELAY_MS = 1000L;
+    /**
+     * Restarts spent on servers whose host had no address at start, until a start resolves them all.
+     * Each restart drops every Telegram connection, and a host that is gone for good would otherwise
+     * cost one every hour and on every network change.
+     */
+    private static final int MAX_UNRESOLVED_RESTARTS = 3;
+
+    public interface SubscriptionCallback {
+        /** On the UI thread. error is null on success. */
+        void onDone(VpnSubscription sub, String error, int servers);
+    }
+
     private final ArrayList<Listener> listeners = new ArrayList<>();
     private final Runnable autoSwitchRunnable = this::switchToNext;
     private final Runnable healthCheckRunnable = this::runHealthCheck;
@@ -239,14 +321,37 @@ public class VpnController implements SingBoxManager.StateListener {
         // value on it was hard on the battery, so an old setting is dropped rather than remapped onto
         // whatever index happens to line up.
         autoSwitchTimeoutIndex = p.getInt("autoswitch_timeout_v2", DEFAULT_AUTOSWITCH_TIMEOUT_INDEX);
+        subscriptions.clear();
+        try {
+            JSONArray subs = new JSONArray(p.getString("subs", "[]"));
+            for (int i = 0; i < subs.length(); i++) {
+                VpnSubscription s = VpnSubscription.fromJson(subs.getJSONObject(i));
+                if (s != null) {
+                    subscriptions.add(s);
+                }
+            }
+        } catch (Exception e) {
+            FileLog.e(e);
+        }
         try {
             JSONArray arr = new JSONArray(p.getString("list", "[]"));
             for (int i = 0; i < arr.length(); i++) {
                 JSONObject o = arr.getJSONObject(i);
-                vpnList.add(new VpnKeyInfo(o.optString("name"), o.optString("key")));
+                VpnKeyInfo info = new VpnKeyInfo(o.optString("name"), o.optString("key"));
+                // An entry whose subscription is missing stays as the plain key it mirrors.
+                // Subscriptions are read first: the reconnect below needs them.
+                info.sub = findSubscriptionById(o.optString("sub", ""));
+                if (info.sub == null || entryOf(info.sub) == null) {
+                    vpnList.add(info);
+                }
             }
         } catch (Exception e) {
             FileLog.e(e);
+        }
+        for (VpnSubscription s : subscriptions) {
+            if (entryOf(s) == null) {
+                vpnList.add(newEntry(s));
+            }
         }
         int cur = p.getInt("current", -1);
         if (cur >= 0 && cur < vpnList.size()) {
@@ -255,11 +360,12 @@ public class VpnController implements SingBoxManager.StateListener {
             currentVpn = vpnList.get(0);
         }
         // The core doesn't survive a process restart, so bring the tunnel back up if it was on.
-        if (enabled && currentVpn != null && !TextUtils.isEmpty(currentVpn.key)
+        if (enabled && currentVpn != null && (currentVpn.sub != null || !TextUtils.isEmpty(currentVpn.key))
                 && SingBoxManager.getInstance().getState() == SingBoxManager.STATE_IDLE) {
             reconnect();
         }
         updateBackgroundKeepAlive();
+        scheduleSubscriptionCheck(SUBSCRIPTION_FIRST_CHECK_MS);
     }
 
     public void save() {
@@ -267,14 +373,30 @@ public class VpnController implements SingBoxManager.StateListener {
         for (VpnKeyInfo info : vpnList) {
             JSONObject o = new JSONObject();
             try {
+                if (info.sub != null) {
+                    // what an older build would run: the first server the group uses
+                    info.key = mirrorKey(info.sub, info.key);
+                    info.name = info.sub.getDisplayName();
+                }
                 o.put("name", info.name == null ? "" : info.name);
                 o.put("key", info.key);
+                if (info.sub != null) {
+                    o.put("sub", info.sub.id);
+                }
                 arr.put(o);
+            } catch (Exception ignored) {
+            }
+        }
+        JSONArray subs = new JSONArray();
+        for (VpnSubscription s : subscriptions) {
+            try {
+                subs.put(s.toJson());
             } catch (Exception ignored) {
             }
         }
         prefs().edit()
                 .putString("list", arr.toString())
+                .putString("subs", subs.toString())
                 .putBoolean("enabled", enabled)
                 .putBoolean("autoswitch", autoSwitch)
                 .putBoolean("route_calls", routeCalls)
@@ -386,6 +508,11 @@ public class VpnController implements SingBoxManager.StateListener {
 
     public void deleteVpn(VpnKeyInfo info) {
         boolean wasCurrent = info == currentVpn;
+        if (info.sub != null) {
+            info.sub.generation++; // a download still in flight must not bring it back
+            subscriptions.remove(info.sub);
+            scheduleNextSubscriptionCheck();
+        }
         vpnList.remove(info);
         if (wasCurrent) {
             currentVpn = vpnList.isEmpty() ? null : vpnList.get(0);
@@ -396,7 +523,7 @@ public class VpnController implements SingBoxManager.StateListener {
             if (isEnabled()) {
                 reconnect();
             } else {
-                SingBoxManager.getInstance().disconnect();
+                stopCore();
             }
             updateBackgroundKeepAlive();
         }
@@ -411,10 +538,14 @@ public class VpnController implements SingBoxManager.StateListener {
         // A fresh try: the core reports the other device again within a minute if it is still on the key
         info.keyInUseElsewhereElapsed = 0;
         save();
-        notifyList();
         if (enabled) {
+            // before notifyList, so the refresh already shows the cleared ping of the new session
             reconnect();
+            // a row tap no longer goes through setEnabled(true) when the VPN is on; keep its retry of
+            // the foreground service and the push connection
+            updateBackgroundKeepAlive();
         }
+        notifyList();
     }
 
     public void setEnabled(boolean value) {
@@ -426,16 +557,53 @@ public class VpnController implements SingBoxManager.StateListener {
         if (enabled && currentVpn != null) {
             reconnect();
         } else {
-            SingBoxManager.getInstance().disconnect();
+            stopCore();
         }
         updateBackgroundKeepAlive();
         notifyList();
     }
 
+    /** Stops the core; pings in flight now measure a core that is going away (see {@link #pingToken}). */
+    private void stopCore() {
+        pingToken++;
+        SingBoxManager.getInstance().disconnect();
+    }
+
     private void reconnect() {
         AndroidUtilities.cancelRunOnUIThread(autoSwitchRunnable);
         stopTrial();
-        if (currentVpn != null && !TextUtils.isEmpty(currentVpn.key)) {
+        // At once, not when the core's state event reaches this thread: from here on currentVpn may
+        // already be the new key while the old core still answers on the port.
+        pingToken++;
+        if (currentVpn != null) {
+            // The row shows ping for the current key as soon as it reads "connected"; without this a
+            // reselected key showed the latency of its previous session until the new ping came back.
+            currentVpn.ping = 0;
+            currentVpn.available = false;
+        }
+        pendingRestart = false;
+        AndroidUtilities.cancelRunOnUIThread(pendingRestartRunnable);
+        groupRetestRequested = false;
+        if (currentVpn != null && currentVpn.sub != null) {
+            VpnSubscription sub = currentVpn.sub;
+            List<VpnKeyInfo> servers = sub.includedServers();
+            if (servers.isEmpty()) {
+                // the build fails with a clear message, the row turns red
+                String what = sub.servers.isEmpty() ? "has no servers yet" : "has every server excluded";
+                FileLog.e("VpnController: subscription '" + sub.getDisplayName() + "' " + what + ", nothing to connect to");
+                if (isInForeground()) { // not on every background auto-switch lap
+                    toast(sub.getDisplayName() + ": " + what);
+                }
+            }
+            String pinned = null;
+            for (VpnKeyInfo s : servers) {
+                if (s.name != null && s.name.equals(sub.pinnedName)) {
+                    pinned = s.name;
+                    break;
+                }
+            }
+            SingBoxManager.getInstance().connectSubscription(sub, servers, sub.getIntervalSec(), pinned);
+        } else if (currentVpn != null && !TextUtils.isEmpty(currentVpn.key)) {
             SingBoxManager.getInstance().connect(currentVpn.key);
         }
     }
@@ -477,9 +645,19 @@ public class VpnController implements SingBoxManager.StateListener {
     @Override
     public void onSingBoxState(int state, String message) {
         AndroidUtilities.runOnUIThread(() -> {
+            pingToken++; // any ping still in flight measured the previous core session
             if (state == SingBoxManager.STATE_CONNECTED) {
                 AndroidUtilities.cancelRunOnUIThread(autoSwitchRunnable);
                 consecutivePingFailures = 0; // fresh core session - don't carry failures across it
+                groupRetestRequested = false;
+                AndroidUtilities.cancelRunOnUIThread(groupFirstRoundRunnable);
+                if (currentVpn != null && currentVpn.sub != null) {
+                    AndroidUtilities.runOnUIThread(groupFirstRoundRunnable, GROUP_FIRST_ROUND_MS);
+                    SingBoxManager.Session session = SingBoxManager.getInstance().getActiveSession();
+                    if (session != null && session.sub == currentVpn.sub && session.unresolved[0] == 0) {
+                        currentVpn.sub.unresolvedRestarts = 0; // every host resolved this time
+                    }
+                }
                 silentBackgroundTicks = 0;
                 tgnetBytesSinceLastTick = false; // whatever arrived went through the previous tunnel
                 measurePing(PING_CONNECT);
@@ -496,6 +674,10 @@ public class VpnController implements SingBoxManager.StateListener {
                 AndroidUtilities.cancelRunOnUIThread(healthCheckRunnable);
                 stopTrial();
                 WebViewProxyController.clear();
+                AndroidUtilities.cancelRunOnUIThread(groupFirstRoundRunnable);
+                for (VpnSubscription s : subscriptions) {
+                    s.groupStatus = null; // the next core starts its tests from scratch
+                }
                 if (state == SingBoxManager.STATE_ERROR && enabled && autoSwitch && vpnList.size() > 1) {
                     AndroidUtilities.cancelRunOnUIThread(autoSwitchRunnable);
                     AndroidUtilities.runOnUIThread(autoSwitchRunnable, 1000L);
@@ -524,6 +706,7 @@ public class VpnController implements SingBoxManager.StateListener {
     private void measurePing(int purpose) {
         final VpnKeyInfo info = currentVpn;
         final int generation = trialGeneration;
+        final int token = pingToken;
         int port = SingBoxManager.getInstance().getLocalPort();
         if (info == null || port <= 0) {
             return;
@@ -531,22 +714,73 @@ public class VpnController implements SingBoxManager.StateListener {
         info.checking = true;
         lastHealthCheckElapsed = SystemClock.elapsedRealtime();
         int account = UserConfig.selectedAccount;
-        ConnectionsManager.getInstance(account).checkProxy(ProxySettings.builder()
-                .setType(ProxySettings.Type.SOCKS5)
-                .setAddress("127.0.0.1")
-                .setPort(port)
-                .build(), time -> AndroidUtilities.runOnUIThread(() -> {
+        // Runs on the UI thread, once: for tgnet's answer or for the deadline, whichever comes first.
+        final boolean[] answered = new boolean[1];
+        final Runnable[] deadline = new Runnable[1];
+        final RequestTimeDelegate onAnswer = time -> {
+            if (answered[0]) {
+                return;
+            }
+            answered[0] = true;
+            AndroidUtilities.cancelRunOnUIThread(deadline[0]);
+            if (token != pingToken || info != currentVpn) {
+                // Stale (see pingToken): the core restarted or the user picked another key while this
+                // ran. A success here was another key's latency and used to mark a dead key as worked,
+                // which put it first in pickNextServer. A failure may be our own restart.
+                if (BuildVars.LOGS_ENABLED) {
+                    FileLog.d("VpnController: ping " + info.getType() + " '" + info.name + "' -> "
+                            + pingResultText(time) + " dropped, the tunnel changed while it ran");
+                }
+                return;
+            }
             info.checking = false;
+            if (time == PING_TIMED_OUT && (!ApplicationLoader.isNetworkOnline() || !isInForeground())) {
+                // tgnet holds proxy checks back while the device is offline (and possibly while its
+                // network is paused in the background), so the silence says nothing about the server.
+                // Counting it would let auto-switch walk away from a working server with no network.
+                if (BuildVars.LOGS_ENABLED) {
+                    FileLog.d("VpnController: ping " + info.getType() + " '" + info.name + "' -> TIMED OUT, not counted ("
+                            + (ApplicationLoader.isNetworkOnline() ? "background" : "offline") + ")");
+                }
+                // A trial waits for this answer and schedules nothing else: end it, the health check
+                // takes over (as runTrialPing does when it finds the device offline).
+                if (purpose == PING_TRIAL && generation == trialGeneration && trialStep >= 0) {
+                    stopTrial();
+                }
+                info.ping = 0; // the latency on the row is unknown now, not the previous value
+                notifyList();
+                return;
+            }
             if (BuildVars.LOGS_ENABLED) {
                 // Why the health check decided what it did. Without this the only symptom is the core
                 // silently restarting every N seconds, which is impossible to attribute from a log.
                 FileLog.d("VpnController: ping " + info.getType() + " '" + info.name + "' -> "
-                        + (time == -1 ? "FAILED" : time + "ms")
+                        + pingResultText(time)
                         + " (" + PING_PURPOSE_NAMES[purpose] + ", autoSwitch=" + autoSwitch
                         + ", state=" + SingBoxManager.getInstance().getState()
                         + ", servers=" + vpnList.size() + ", fg=" + isInForeground() + ")");
             }
-            if (time == -1) {
+            if (time < 0 && purpose == PING_HEALTH && info.sub != null
+                    && SingBoxManager.getInstance().getState() == SingBoxManager.STATE_CONNECTED) {
+                // A subscription runs as a group that retests its servers only every few minutes,
+                // so its selected server may have died since. Every failed health ping asks for a
+                // test of every server now (with nothing to switch to, that is the only remedy).
+                // The first one is not counted: counting it could switch away from the whole
+                // subscription while the group still has working servers.
+                SingBoxManager.getInstance().requestUrlTest();
+                if (!groupRetestRequested) {
+                    groupRetestRequested = true;
+                    info.available = false;
+                    info.ping = 0;
+                    if (BuildVars.LOGS_ENABLED) {
+                        FileLog.d("VpnController: subscription '" + info.getDisplayName()
+                                + "' did not answer - the group tests every server now, this failure is not counted");
+                    }
+                    notifyList();
+                    return;
+                }
+            }
+            if (time < 0) {
                 info.available = false;
                 info.ping = 0;
                 // Only the periodic health check and a trial switch, and only if we're still connected to
@@ -581,15 +815,32 @@ public class VpnController implements SingBoxManager.StateListener {
                 lastTunnelWorkedElapsed = SystemClock.elapsedRealtime();
                 info.lastWorkedElapsed = lastTunnelWorkedElapsed;
                 consecutivePingFailures = 0;
+                groupRetestRequested = false;
                 if (info == currentVpn && trialStep >= 0) {
                     if (BuildVars.LOGS_ENABLED) {
                         FileLog.d("VpnController: '" + info.getDisplayName() + "' answered - trial over, staying");
                     }
                     stopTrial();
                 }
+                // The tunnel now carries traffic, so a due subscription can download through it. Not
+                // on CONNECTED: the core reports that before the server handshake is done.
+                if (!subscriptions.isEmpty()) {
+                    checkSubscriptionsDue();
+                }
             }
             notifyList();
-        }));
+        };
+        deadline[0] = () -> onAnswer.run(PING_TIMED_OUT);
+        AndroidUtilities.runOnUIThread(deadline[0], PING_TIMEOUT_MS);
+        ConnectionsManager.getInstance(account).checkProxy(ProxySettings.builder()
+                .setType(ProxySettings.Type.SOCKS5)
+                .setAddress("127.0.0.1")
+                .setPort(port)
+                .build(), time -> AndroidUtilities.runOnUIThread(() -> onAnswer.run(time)));
+    }
+
+    private static String pingResultText(long time) {
+        return time == PING_TIMED_OUT ? "TIMED OUT" : time < 0 ? "FAILED" : time + "ms";
     }
 
     /**
@@ -602,7 +853,12 @@ public class VpnController implements SingBoxManager.StateListener {
      */
     private void scheduleHealthCheck() {
         AndroidUtilities.cancelRunOnUIThread(healthCheckRunnable);
-        if (!enabled || !autoSwitch || vpnList.size() < 2) {
+        // With auto-switch on, a subscription alone in the list still gets the check: its failed
+        // pings ask the group to retest its servers (see measurePing), even with nothing to switch
+        // to. With auto-switch off there are no pings; the network-change hook and the first-round
+        // check (checkGroupFirstRound) still ask for a retest.
+        boolean subscription = currentVpn != null && currentVpn.sub != null;
+        if (!enabled || !autoSwitch || (vpnList.size() < 2 && !subscription)) {
             return;
         }
         long delay = BACKGROUND_TICK_MS;
@@ -650,6 +906,23 @@ public class VpnController implements SingBoxManager.StateListener {
      * {@link #NETWORK_LAP_INTERVAL_MS} a change also clears the failure marks and allows a quick lap.
      */
     private void recheckAfterNetworkChange() {
+        if (isEnabled() && currentVpn.sub != null && ApplicationLoader.isNetworkOnline()
+                && SingBoxManager.getInstance().getState() == SingBoxManager.STATE_CONNECTED) {
+            // The group ranked its servers on the old network. Independent of auto-switch.
+            SingBoxManager.Session session = SingBoxManager.getInstance().getActiveSession();
+            if (session != null && session.unresolved[0] > 0 && currentVpn.sub.unresolvedRestarts < MAX_UNRESOLVED_RESTARTS) {
+                currentVpn.sub.unresolvedRestarts++;
+                String action = restartOrDefer("network changed, " + session.unresolved[0] + " servers had no address at start");
+                if (BuildVars.LOGS_ENABLED) {
+                    FileLog.d("VpnController: subscription '" + currentVpn.getDisplayName() + "': " + action);
+                }
+                return;
+            }
+            if (BuildVars.LOGS_ENABLED) {
+                FileLog.d("VpnController: network changed - subscription '" + currentVpn.getDisplayName() + "' tests every server again");
+            }
+            SingBoxManager.getInstance().requestUrlTest();
+        }
         if (!enabled || !autoSwitch || currentVpn == null || vpnList.size() < 2) {
             return;
         }
@@ -794,6 +1067,19 @@ public class VpnController implements SingBoxManager.StateListener {
      * suspends and resume with it, and a silent stretch spent asleep never counts as silence.
      */
     private void runHealthCheck() {
+        // With auto-switch on, a server picked in the subscription's submenu holds until this check,
+        // then the group goes back to the fastest (user, 2026-11-17: "if reconnect is on, next pings
+        // > fastest server"). The pick re-arms this tick, so it holds one full interval. A pick from
+        // before an app restart has no time and goes at the first check. Not in a call.
+        if (enabled && autoSwitch && currentVpn != null && currentVpn.sub != null && currentVpn.sub.pinnedName != null
+                && !isCallActive() && (currentVpn.sub.pinnedAtElapsed == 0
+                || SystemClock.elapsedRealtime() - currentVpn.sub.pinnedAtElapsed >= PIN_MIN_HOLD_MS)) {
+            pickSubscriptionServer(currentVpn.sub, null, "auto-switch is on");
+            // No health ping in this tick: the switch closes open connections, a ping now could
+            // fail on it. The pick's own ping a second later shows the new latency.
+            scheduleHealthCheck();
+            return;
+        }
         boolean trafficFlowed = tgnetBytesSinceLastTick;
         tgnetBytesSinceLastTick = false;
         if (enabled && currentVpn != null
@@ -883,8 +1169,8 @@ public class VpnController implements SingBoxManager.StateListener {
         }
         trialAfterConnect = trial;
         save();
+        reconnect(); // before notifyList, so the refresh already shows the cleared ping
         notifyList();
-        reconnect();
     }
 
     private boolean hasFreshServer(long now) {
@@ -1004,6 +1290,596 @@ public class VpnController implements SingBoxManager.StateListener {
      */
     private boolean isCallActive() {
         return VoIPService.getSharedInstance() != null;
+    }
+
+    // ---- subscriptions ----
+
+    private VpnSubscription findSubscriptionById(String id) {
+        if (TextUtils.isEmpty(id)) {
+            return null;
+        }
+        for (VpnSubscription s : subscriptions) {
+            if (s.id.equals(id)) {
+                return s;
+            }
+        }
+        return null;
+    }
+
+    public VpnSubscription findSubscriptionByUrl(String url) {
+        for (VpnSubscription s : subscriptions) {
+            if (s.url.equals(url)) {
+                return s;
+            }
+        }
+        return null;
+    }
+
+    /** The list entry that stands for a subscription, or null. */
+    public VpnKeyInfo entryOf(VpnSubscription sub) {
+        for (VpnKeyInfo info : vpnList) {
+            if (info.sub == sub) {
+                return info;
+            }
+        }
+        return null;
+    }
+
+    private static VpnKeyInfo newEntry(VpnSubscription sub) {
+        VpnKeyInfo entry = new VpnKeyInfo(sub.getDisplayName(), mirrorKey(sub, ""));
+        entry.sub = sub;
+        return entry;
+    }
+
+    /** The key an older build would run for this subscription: the first server the group uses. */
+    private static String mirrorKey(VpnSubscription sub, String fallback) {
+        List<VpnKeyInfo> included = sub.includedServers();
+        if (!included.isEmpty()) {
+            return included.get(0).key;
+        }
+        if (!sub.servers.isEmpty()) {
+            return sub.servers.get(0).key;
+        }
+        return fallback == null ? "" : fallback;
+    }
+
+    /** Whether this subscription carries the tunnel right now (selected and the VPN on). */
+    public boolean isRunning(VpnSubscription sub) {
+        return isEnabled() && currentVpn != null && currentVpn.sub == sub;
+    }
+
+    /** The local proxy port when the tunnel is up, so a download goes through it; 0 means direct. */
+    private int subscriptionProxyPort() {
+        SingBoxManager m = SingBoxManager.getInstance();
+        int port = m.getLocalPort();
+        return enabled && currentVpn != null && m.getState() == SingBoxManager.STATE_CONNECTED && port > 0 ? port : 0;
+    }
+
+    /**
+     * Whether the tunnel answered its last ping. A download that fails through a tunnel that is up
+     * but not proven is tried again direct: if every key of a subscription was replaced, the dead
+     * tunnel would otherwise block the only way to the new keys.
+     */
+    private boolean tunnelProven() {
+        return currentVpn != null && currentVpn.available
+                && SingBoxManager.getInstance().getState() == SingBoxManager.STATE_CONNECTED;
+    }
+
+    /** Worker thread. */
+    private static VpnSubscriptionFetcher.Result fetchWithFallback(String url, int port, boolean directRetry) {
+        VpnSubscriptionFetcher.Result r = VpnSubscriptionFetcher.fetch(url, port);
+        if (r.error != null && port > 0 && directRetry) {
+            VpnSubscriptionFetcher.Result direct = VpnSubscriptionFetcher.fetch(url, 0);
+            direct.tunnelAttempt = r;
+            return direct;
+        }
+        return r;
+    }
+
+    /** The error of a download in one line, for a toast and the subscription screen. */
+    public static String errorText(VpnSubscriptionFetcher.Result r) {
+        String text = (r.viaTunnel ? "via VPN: " : "direct: ") + r.errorLine;
+        if (r.tunnelAttempt != null) {
+            text = "via VPN: " + r.tunnelAttempt.errorLine + "; " + text;
+        }
+        return text;
+    }
+
+    /** Full error into the log (with logging on): every exception in the chain with its stack frames. */
+    private void logSubscriptionFetch(VpnSubscription sub, VpnSubscriptionFetcher.Result r, String reason) {
+        if (!BuildVars.LOGS_ENABLED) {
+            return;
+        }
+        String head = "VpnController: subscription '" + sub.getDisplayName() + "' (" + reason + ") ";
+        VpnSubscriptionFetcher.Result tunnel = r.tunnelAttempt;
+        if (tunnel != null) {
+            FileLog.e(head + "download through the VPN failed after " + tunnel.tookMs + " ms (the tunnel did not answer"
+                    + " its last ping, so trying direct): " + tunnel.errorDetail);
+        }
+        String route = r.viaTunnel ? "through the VPN" : "direct";
+        if (r.error != null) {
+            FileLog.e(head + "download " + route + " failed after " + r.tookMs + " ms: " + r.errorDetail);
+        } else {
+            FileLog.d(head + "downloaded " + route + ": " + r.keys.size() + " servers, " + (r.base64 ? "base64" : "plain")
+                    + ", " + r.bodyBytes + " bytes, " + r.tookMs + " ms"
+                    + (TextUtils.isEmpty(r.skipped) ? "" : ", skipped " + r.skipped)
+                    + (r.errorDetail != null ? "; " + r.errorDetail : ""));
+        }
+    }
+
+    private static void toast(String text) {
+        try {
+            Toast.makeText(ApplicationLoader.applicationContext, text, Toast.LENGTH_LONG).show();
+        } catch (Throwable e) {
+            FileLog.e(e);
+        }
+    }
+
+    /**
+     * Downloads a new subscription and adds it as one entry at the top of the list. Nothing is
+     * saved unless the download works. The caller handles a link that is already in the list.
+     */
+    public void addSubscription(String url, String name, SubscriptionCallback callback) {
+        final VpnSubscription sub = new VpnSubscription(UUID.randomUUID().toString(), url);
+        sub.name = name == null ? "" : name.trim();
+        final int port = subscriptionProxyPort();
+        final boolean directRetry = port > 0 && !tunnelProven();
+        subscriptionWorker.execute(() -> {
+            VpnSubscriptionFetcher.Result r = fetchWithFallback(url, port, directRetry);
+            AndroidUtilities.runOnUIThread(() -> {
+                logSubscriptionFetch(sub, r, "add");
+                if (r.error != null) {
+                    callback.onDone(sub, errorText(r), 0);
+                    return;
+                }
+                VpnSubscription existing = findSubscriptionByUrl(url);
+                if (existing != null) {
+                    // added twice while the first download ran: the result updates that one
+                    applySubscriptionUpdate(existing, r, true);
+                    callback.onDone(existing, null, existing.servers.size());
+                    return;
+                }
+                sub.title = r.title == null ? "" : r.title;
+                sub.servers = new ArrayList<>(r.keys);
+                sub.lastUpdateWallMs = System.currentTimeMillis();
+                sub.lastAttemptWallMs = sub.lastUpdateWallMs;
+                sub.lastUpdateViaTunnel = r.viaTunnel;
+                subscriptions.add(sub);
+                VpnKeyInfo entry = newEntry(sub);
+                vpnList.add(0, entry);
+                // Like addVpns, but no restart of a tunnel that already runs on another entry.
+                boolean pick = currentVpn == null;
+                if (pick) {
+                    currentVpn = entry;
+                }
+                save();
+                notifyList();
+                if (pick) {
+                    if (isEnabled()) {
+                        reconnect();
+                    }
+                    updateBackgroundKeepAlive();
+                }
+                scheduleNextSubscriptionCheck();
+                callback.onDone(sub, null, sub.servers.size());
+            });
+        });
+    }
+
+    /**
+     * Downloads a subscription again. Manual: the "Update now" button, always goes out and reports
+     * the result in a toast. Automatic: skipped while offline, and its failures step the backoff.
+     */
+    public void refreshSubscription(VpnSubscription sub, boolean manual) {
+        if (sub.fetching || !subscriptions.contains(sub)) {
+            return;
+        }
+        if (!manual && !ApplicationLoader.isNetworkOnline()) {
+            return; // nothing to learn about the link offline; the timer looks again
+        }
+        sub.fetching = true;
+        sub.lastAttemptWallMs = System.currentTimeMillis();
+        final int generation = sub.generation;
+        final int token = pingToken;
+        final int port = subscriptionProxyPort();
+        final boolean directRetry = port > 0 && !tunnelProven();
+        final String url = sub.url;
+        notifyList();
+        subscriptionWorker.execute(() -> {
+            VpnSubscriptionFetcher.Result r = fetchWithFallback(url, port, directRetry);
+            AndroidUtilities.runOnUIThread(() -> onSubscriptionFetched(sub, generation, token, manual, r));
+        });
+    }
+
+    private void onSubscriptionFetched(VpnSubscription sub, int generation, int token, boolean manual, VpnSubscriptionFetcher.Result r) {
+        sub.fetching = false;
+        logSubscriptionFetch(sub, r, manual ? "manual" : "hourly");
+        if (generation != sub.generation || !subscriptions.contains(sub)) {
+            if (BuildVars.LOGS_ENABLED) {
+                FileLog.d("VpnController: subscription '" + sub.getDisplayName() + "' was deleted while it downloaded, result dropped");
+            }
+            return;
+        }
+        if (r.error != null) {
+            String text = errorText(r);
+            sub.lastError = r.error;
+            sub.lastErrorDetail = text;
+            // A failure through a tunnel that restarted while the request ran says nothing about the
+            // link itself, so it does not step the backoff.
+            boolean tunnelChanged = r.viaTunnel && token != pingToken;
+            if (!manual && !tunnelChanged) {
+                sub.failures++;
+            }
+            // Automatic failures: one toast per streak, and only where the user can see it.
+            if (manual || (sub.failures == 1 && isInForeground())) {
+                toast(sub.getDisplayName() + ": update failed, " + text);
+            }
+            notifyList();
+            scheduleNextSubscriptionCheck();
+            return;
+        }
+        applySubscriptionUpdate(sub, r, manual);
+        if (manual) {
+            toast(LocaleController.formatString(R.string.VpnSubscriptionUpdatedToast, sub.getDisplayName(), sub.servers.size()));
+        }
+    }
+
+    /**
+     * Stores the downloaded servers. The running group is restarted only when that changes
+     * something: the server list itself changed (see {@link VpnSubscriptionParser#identity}, which
+     * ignores the sni and sid that BlancVPN rotates on every download), or the tunnel is failing.
+     * Every restart makes the core test all servers again. A manual update that changed nothing
+     * asks the running group for a fresh test instead. Never in a call: then it waits for its end.
+     */
+    private void applySubscriptionUpdate(VpnSubscription sub, VpnSubscriptionFetcher.Result r, boolean manual) {
+        String before = sub.identity();
+        int oldCount = sub.servers.size();
+        sub.servers = new ArrayList<>(r.keys);
+        boolean changed = !before.equals(sub.identity());
+        dropPinIfGone(sub);
+        if (!TextUtils.isEmpty(r.title)) {
+            sub.title = r.title;
+        }
+        sub.lastUpdateWallMs = System.currentTimeMillis();
+        sub.lastUpdateViaTunnel = r.viaTunnel;
+        sub.lastError = null;
+        sub.lastErrorDetail = null;
+        sub.failures = 0;
+        String action = "the group keeps running";
+        if (isRunning(sub)) {
+            boolean failing = consecutivePingFailures > 0 || groupRetestRequested
+                    || SingBoxManager.getInstance().getState() == SingBoxManager.STATE_ERROR;
+            // servers whose host did not resolve when this core started are missing from the group
+            SingBoxManager.Session session = SingBoxManager.getInstance().getActiveSession();
+            boolean unresolved = session != null && session.sub == sub && session.unresolved[0] > 0
+                    && sub.unresolvedRestarts < MAX_UNRESOLVED_RESTARTS;
+            if (unresolved && !changed && !failing) {
+                sub.unresolvedRestarts++;
+            }
+            if (changed || failing || unresolved) {
+                action = restartOrDefer(changed ? "the server list changed" : failing ? "the tunnel is failing"
+                        : session.unresolved[0] + " servers had no address at start");
+            } else if (manual) {
+                SingBoxManager.getInstance().requestUrlTest();
+                action = "same servers, the group tests them again";
+            }
+        } else {
+            action = "not running";
+        }
+        if (BuildVars.LOGS_ENABLED) {
+            FileLog.d("VpnController: subscription '" + sub.getDisplayName() + "' updated: " + oldCount + " -> "
+                    + sub.servers.size() + " servers, " + sub.includedServers().size() + " used, "
+                    + (changed ? "changed" : "same servers") + ", " + action);
+        }
+        save();
+        notifyList();
+        scheduleNextSubscriptionCheck();
+    }
+
+    /** Restarts the core for the current subscription now, or once the call in progress ends. Returns what it did, for the log. */
+    private String restartOrDefer(String why) {
+        if (isCallActive()) {
+            pendingRestart = true;
+            AndroidUtilities.cancelRunOnUIThread(pendingRestartRunnable);
+            AndroidUtilities.runOnUIThread(pendingRestartRunnable, PENDING_RESTART_CHECK_MS);
+            return why + ", restart after the call";
+        }
+        reconnect();
+        return why + ", restarted";
+    }
+
+    private void runPendingRestart() {
+        if (!pendingRestart) {
+            return;
+        }
+        if (isCallActive()) {
+            AndroidUtilities.runOnUIThread(pendingRestartRunnable, PENDING_RESTART_CHECK_MS);
+            return;
+        }
+        pendingRestart = false;
+        if (isEnabled() && currentVpn != null && currentVpn.sub != null) {
+            if (BuildVars.LOGS_ENABLED) {
+                FileLog.d("VpnController: call ended, restarting subscription '" + currentVpn.getDisplayName() + "' with its new settings");
+            }
+            reconnect();
+        }
+    }
+
+    /** The submenu changed how the group runs: restart it a moment after the last change, if it runs. */
+    private void settingsChanged(VpnSubscription sub) {
+        notifyList(); // saved with the restart below, not on every slider step
+        settingsChangedSub = sub;
+        AndroidUtilities.cancelRunOnUIThread(settingsRestartRunnable);
+        AndroidUtilities.runOnUIThread(settingsRestartRunnable, SETTINGS_RESTART_DELAY_MS);
+    }
+
+    private void applySettingsChange() {
+        VpnSubscription sub = settingsChangedSub;
+        settingsChangedSub = null;
+        save();
+        if (sub != null && isRunning(sub)) {
+            String action = restartOrDefer("settings changed");
+            if (BuildVars.LOGS_ENABLED) {
+                FileLog.d("VpnController: subscription '" + sub.getDisplayName() + "': check every " + sub.getIntervalSec()
+                        + " s, exclude '" + sub.exclude + "', " + sub.includedServers().size() + " of " + sub.servers.size()
+                        + " servers used - " + action);
+            }
+        }
+    }
+
+    public void setSubscriptionInterval(VpnSubscription sub, int index) {
+        if (sub.intervalIndex == index) {
+            return;
+        }
+        sub.intervalIndex = index;
+        settingsChanged(sub);
+    }
+
+    public void setSubscriptionExclude(VpnSubscription sub, String exclude) {
+        String value = exclude == null ? "" : exclude.trim();
+        if (value.equals(sub.exclude)) {
+            return;
+        }
+        sub.exclude = value;
+        dropPinIfGone(sub);
+        settingsChanged(sub);
+    }
+
+    /** A picked server that an update removed or the exclude list now hides is no longer picked. */
+    private void dropPinIfGone(VpnSubscription sub) {
+        if (sub.pinnedName == null) {
+            return;
+        }
+        for (VpnKeyInfo s : sub.includedServers()) {
+            if (sub.pinnedName.equals(s.name)) {
+                return;
+            }
+        }
+        if (BuildVars.LOGS_ENABLED) {
+            FileLog.d("VpnController: subscription '" + sub.getDisplayName() + "': the picked server is gone, back to the fastest");
+        }
+        sub.pinnedName = null;
+        sub.pinnedAtElapsed = 0;
+    }
+
+    /**
+     * Picks one server of a subscription (submenu tap), or with null goes back to the fastest. If the
+     * subscription is not in use, it becomes the current entry and the core starts on the pick.
+     * If it runs, the core's selector switches in place, without a restart, and open connections
+     * through the old server are closed so Telegram moves at once. With auto-switch on the pick
+     * holds until the next health check (see runHealthCheck); with it off it stays.
+     */
+    public void pickSubscriptionServer(VpnSubscription sub, VpnKeyInfo server, String why) {
+        if (server != null && sub.isExcluded(server)) {
+            return;
+        }
+        sub.pinnedName = server == null ? null : server.name;
+        sub.pinnedAtElapsed = server == null ? 0 : SystemClock.elapsedRealtime();
+        save();
+        VpnKeyInfo entry = entryOf(sub);
+        if (BuildVars.LOGS_ENABLED) {
+            FileLog.d("VpnController: subscription '" + sub.getDisplayName() + "': "
+                    + (server == null ? "back to the fastest server" : "server '" + server.name + "' picked")
+                    + " (" + why + ", auto-switch " + (autoSwitch ? "on: holds until the next check" : "off: stays") + ")");
+        }
+        if (entry == null) {
+            notifyList();
+            return;
+        }
+        if (entry != currentVpn || !isEnabled()) {
+            selectVpn(entry);
+            if (!isEnabled()) {
+                setEnabled(true);
+            }
+            return; // the new core starts on the pick
+        }
+        consecutivePingFailures = 0; // another server now, the old one's failures do not count
+        groupRetestRequested = false;
+        if (SingBoxManager.getInstance().selectServer(sub.pinnedName)) {
+            // A ping in flight measured the old server, and the switch closes its connection.
+            pingToken++;
+            VpnSubscription.GroupStatus status = sub.groupStatus;
+            if (status != null) {
+                // shown at once; the core's own event follows and replaces it
+                status.pinned = sub.pinnedName != null;
+                status.selectedName = status.pinned ? sub.pinnedName : status.fastestName;
+            }
+            currentVpn.ping = 0;
+            AndroidUtilities.runOnUIThread(() -> measurePing(PING_CONNECT), PICK_PING_DELAY_MS);
+            if (sub.pinnedName == null) {
+                // the group may have stopped testing while a server was picked; fresh numbers now
+                SingBoxManager.getInstance().requestUrlTest();
+            }
+        } else {
+            String action = restartOrDefer("the server could not be switched in place");
+            if (BuildVars.LOGS_ENABLED) {
+                FileLog.d("VpnController: subscription '" + sub.getDisplayName() + "': " + action);
+            }
+        }
+        if (sub.pinnedName != null && autoSwitch) {
+            scheduleHealthCheck(); // re-arm: the pick holds one full interval
+        }
+        notifyList();
+        notifyGroupStatus();
+    }
+
+    public void renameSubscription(VpnSubscription sub, String name) {
+        sub.name = name == null ? "" : name.trim();
+        save();
+        notifyList();
+    }
+
+    /** Removes a subscription and its list entry. */
+    public void deleteSubscription(VpnSubscription sub) {
+        VpnKeyInfo entry = entryOf(sub);
+        if (entry != null) {
+            deleteVpn(entry);
+        } else {
+            sub.generation++;
+            subscriptions.remove(sub);
+            save();
+            notifyList();
+            scheduleNextSubscriptionCheck();
+        }
+    }
+
+    /**
+     * The running group's state, from the core's log client on a gomobile thread. Dropped when the
+     * core that sent it is no longer the running one (a client of the previous core can still
+     * deliver after the next one started).
+     */
+    static void onGroupStatus(SingBoxManager.Session session, VpnSubscription.GroupStatus status) {
+        AndroidUtilities.runOnUIThread(() -> {
+            VpnController controller = instance;
+            if (controller == null || session.sub == null
+                    || session != SingBoxManager.getInstance().getActiveSession()
+                    || SingBoxManager.getInstance().getState() != SingBoxManager.STATE_CONNECTED
+                    || !controller.subscriptions.contains(session.sub)) {
+                return;
+            }
+            VpnSubscription.GroupStatus old = session.sub.groupStatus;
+            if (old != null && old.tested) {
+                status.tested = true; // a later round where nothing answered still counts as tested
+            }
+            session.sub.groupStatus = status;
+            controller.reconcileSelector(session, status);
+            if (BuildVars.LOGS_ENABLED && status.tested && status.selectedName != null
+                    && (old == null || !status.selectedName.equals(old.selectedName))) {
+                Integer delay = status.delays.get(status.selectedName);
+                FileLog.d("VpnController: subscription '" + session.sub.getDisplayName() + "' now uses '" + status.selectedName
+                        + "'" + (delay != null ? " (" + delay + " ms)" : "") + ", " + status.delays.size() + " of "
+                        + session.tagNames.size() + " servers answered the last test");
+            }
+            controller.notifyGroupStatus();
+        });
+    }
+
+    /**
+     * Puts the core's selector on the app's choice when the two differ. The core keeps the last
+     * selector choice in its cache file and on start that wins over the config's default, so a pick
+     * made while the subscription was off could be ignored, or a pick that was already dropped could
+     * come back on whatever server now has its old tag. A failed in-place switch ends up here too.
+     * A few tries per core session, so a choice the core cannot take does not loop.
+     */
+    private void reconcileSelector(SingBoxManager.Session session, VpnSubscription.GroupStatus status) {
+        VpnSubscription sub = session.sub;
+        String want = sub.pinnedName != null && status.members.contains(sub.pinnedName) ? sub.pinnedName : null;
+        boolean onWant = want == null ? !status.pinned : status.pinned && want.equals(status.selectedName);
+        if (onWant || session.reconcileTries >= 3) {
+            return;
+        }
+        session.reconcileTries++;
+        if (BuildVars.LOGS_ENABLED) {
+            FileLog.d("VpnController: subscription '" + sub.getDisplayName() + "': the core is on "
+                    + (status.pinned ? "'" + status.selectedName + "'" : "the fastest server") + ", the app chose "
+                    + (want != null ? "'" + want + "'" : "the fastest server") + " - switching (try " + session.reconcileTries + ")");
+        }
+        SingBoxManager.getInstance().selectServer(want);
+    }
+
+    /**
+     * {@link #GROUP_FIRST_ROUND_MS} after a subscription's core started: its first round is over.
+     * With no delay at all nothing answered (the core may have started before the network was up),
+     * so ask for another round instead of waiting a whole interval on the first server.
+     */
+    private void checkGroupFirstRound() {
+        SingBoxManager m = SingBoxManager.getInstance();
+        SingBoxManager.Session session = m.getActiveSession();
+        if (!isEnabled() || currentVpn.sub == null || m.getState() != SingBoxManager.STATE_CONNECTED
+                || session == null || session.sub != currentVpn.sub) {
+            return;
+        }
+        VpnSubscription sub = currentVpn.sub;
+        VpnSubscription.GroupStatus status = sub.groupStatus;
+        if (status == null) {
+            status = new VpnSubscription.GroupStatus();
+            status.members.addAll(session.tagNames.values());
+            sub.groupStatus = status;
+        }
+        status.tested = true;
+        if (status.delays.isEmpty()) {
+            if (BuildVars.LOGS_ENABLED) {
+                FileLog.d("VpnController: subscription '" + sub.getDisplayName() + "': no server answered the first test round, testing again");
+            }
+            m.requestUrlTest();
+        }
+        notifyGroupStatus();
+    }
+
+    private void notifyGroupStatus() {
+        for (Listener l : new ArrayList<>(listeners)) {
+            l.onVpnGroupStatusChanged();
+        }
+    }
+
+    /** Milliseconds until a subscription should be downloaded again, 0 or less when it is due. */
+    private static long msUntilDue(VpnSubscription s, long now) {
+        if (s.fetching) {
+            return SUBSCRIPTION_RETRY_MS[0];
+        }
+        if (s.failures > 0) {
+            long since = now - s.lastAttemptWallMs;
+            if (since < 0) {
+                return 0; // the clock moved back
+            }
+            return SUBSCRIPTION_RETRY_MS[Math.min(s.failures, SUBSCRIPTION_RETRY_MS.length) - 1] - since;
+        }
+        long since = now - s.lastUpdateWallMs;
+        if (since < 0) {
+            return 0;
+        }
+        return SUBSCRIPTION_INTERVAL_MS - since;
+    }
+
+    private void checkSubscriptionsDue() {
+        long now = System.currentTimeMillis();
+        for (VpnSubscription s : new ArrayList<>(subscriptions)) {
+            if (msUntilDue(s, now) <= 0) {
+                refreshSubscription(s, false);
+            }
+        }
+        scheduleNextSubscriptionCheck();
+    }
+
+    private void scheduleNextSubscriptionCheck() {
+        long now = System.currentTimeMillis();
+        long next = Long.MAX_VALUE;
+        for (VpnSubscription s : subscriptions) {
+            next = Math.min(next, msUntilDue(s, now));
+        }
+        scheduleSubscriptionCheck(next);
+    }
+
+    /**
+     * A plain main-looper post, like the health tick: it does not fire in deep sleep, and catches up
+     * when the device wakes. It also runs with auto-switch off, which the health tick does not.
+     */
+    private void scheduleSubscriptionCheck(long delayMs) {
+        AndroidUtilities.cancelRunOnUIThread(subscriptionCheckRunnable);
+        if (subscriptions.isEmpty()) {
+            return;
+        }
+        AndroidUtilities.runOnUIThread(subscriptionCheckRunnable, Math.max(delayMs, SUBSCRIPTION_MIN_CHECK_MS));
     }
 
     public int getState() {

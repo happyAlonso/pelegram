@@ -10,6 +10,12 @@ import org.telegram.utils.proxy.ProxySettings;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import libbox.CommandServer;
 import libbox.CommandServerHandler;
@@ -61,10 +67,9 @@ public class SingBoxManager implements CommandServerHandler {
     private final ArrayList<StateListener> listeners = new ArrayList<>();
 
     private CommandServer commandServer;
-    private SingBoxLogClient logClient;
+    private volatile SingBoxLogClient logClient;
     private volatile int state = STATE_IDLE;
     private volatile int localPort = -1;
-    private String activeKey;
 
     public int getState() {
         return state;
@@ -100,30 +105,138 @@ public class SingBoxManager implements CommandServerHandler {
         }
     }
 
-    /** Connect using a pasted VPN key. Runs off the caller's thread. */
+    /**
+     * Connects and disconnects run one at a time, in call order, on this thread. They used to get a
+     * thread each, so two requests in a row (a row tap calls selectVpn and setEnabled, two quick taps
+     * on different keys) raced: either could finish last, and the proxy port and CONNECTED state of
+     * one start could be published after the next start had begun.
+     */
+    private final ExecutorService worker = Executors.newSingleThreadExecutor(r -> new Thread(r, "singbox-worker"));
+    /** Numbers every connect/disconnect request; a queued request that is no longer the latest is skipped. */
+    private final AtomicInteger requestSeq = new AtomicInteger();
+
+    /** Builds the core config for the local port the core will listen on. */
+    public interface ConfigSource {
+        String build(int localPort) throws Exception;
+    }
+
+    /**
+     * One core start. Events from the core (group status) carry the session they came from, so an
+     * event from a core that was already replaced can be told apart and dropped.
+     */
+    public static final class Session {
+        final ConfigSource source;
+        /** The subscription this core runs as a group, null for a single key. */
+        public final VpnSubscription sub;
+        /** Group member tag -> server name, filled when the config is built. Empty for a single key. */
+        public final Map<String, String> tagNames = new ConcurrentHashMap<>();
+        /** [0]: servers left out of the group because their host had no address when it was built. */
+        public final int[] unresolved = new int[1];
+        /** UI thread: times VpnController moved the selector back to the app's choice in this session. */
+        public int reconcileTries;
+
+        Session(ConfigSource source, VpnSubscription sub) {
+            this.source = source;
+            this.sub = sub;
+        }
+    }
+
+    private volatile Session activeSession;
+
+    /** The session of the core that runs now, or null. */
+    public Session getActiveSession() {
+        return activeSession;
+    }
+
+    /** Connect using a pasted VPN key. Runs off the caller's thread; a later request supersedes it. */
     public void connect(final String rawKey) {
-        Thread t = new Thread(() -> {
+        connect(new Session(port -> SingBoxConfigBuilder.build(rawKey, port), null));
+    }
+
+    /** Run a subscription's servers as one urltest group, see SingBoxConfigBuilder.buildGroup. */
+    public void connectSubscription(VpnSubscription sub, List<VpnKeyInfo> servers, int intervalSec, String pinnedName) {
+        final List<VpnKeyInfo> snapshot = new ArrayList<>(servers);
+        final Session[] holder = new Session[1];
+        holder[0] = new Session(port -> SingBoxConfigBuilder.buildGroup(snapshot, port, intervalSec,
+                holder[0].tagNames, holder[0].unresolved, pinnedName), sub);
+        connect(holder[0]);
+    }
+
+    /**
+     * Points the running subscription's selector at one server (by name) or, with null, back at the
+     * fastest. No restart: only new connections move. False when it cannot be done in place (no
+     * running subscription, server not in the group, log client not connected); the caller then
+     * restarts the core, whose config starts on the same choice.
+     */
+    public boolean selectServer(String serverName) {
+        final SingBoxLogClient client = logClient;
+        Session session = activeSession;
+        if (client == null || !client.isConnected() || session == null || session.sub == null) {
+            return false;
+        }
+        String tag = SingBoxConfigBuilder.GROUP_AUTO_TAG;
+        if (serverName != null) {
+            tag = null;
+            for (Map.Entry<String, String> e : session.tagNames.entrySet()) {
+                if (serverName.equals(e.getValue())) {
+                    tag = e.getKey();
+                    break;
+                }
+            }
+            if (tag == null) {
+                return false;
+            }
+        }
+        final String target = tag;
+        new Thread(() -> client.selectOutbound(SingBoxConfigBuilder.TAG_PROXY, target), "singbox-select").start();
+        return true;
+    }
+
+    private void connect(final Session session) {
+        final int seq = requestSeq.incrementAndGet();
+        worker.execute(() -> {
+            if (seq != requestSeq.get()) {
+                return; // a newer connect or disconnect is queued behind this one
+            }
             try {
-                startInternal(rawKey);
+                startInternal(session);
             } catch (Throwable e) {
                 FileLog.e(e);
                 stopInternalQuietly();
                 setState(STATE_ERROR, e.getMessage());
             }
-        }, "singbox-connect");
-        t.start();
+        });
     }
 
-    /** Disconnect and clear the proxy. Runs off the caller's thread. */
+    /**
+     * Asks the running group to test every server now instead of at its next interval. Used when
+     * the tunnel stops answering: with a long interval the group would otherwise keep a dead server
+     * until a dial to it fails. No-op for a single key or before the log client is connected.
+     */
+    public void requestUrlTest() {
+        final SingBoxLogClient client = logClient;
+        Session session = activeSession;
+        if (client == null || session == null || session.sub == null) {
+            return;
+        }
+        new Thread(() -> client.urlTest(SingBoxConfigBuilder.GROUP_AUTO_TAG), "singbox-urltest").start();
+    }
+
+    /** Disconnect and clear the proxy. Runs off the caller's thread; a later request supersedes it. */
     public void disconnect() {
-        Thread t = new Thread(() -> {
-            stopInternalQuietly();
+        final int seq = requestSeq.incrementAndGet();
+        worker.execute(() -> {
+            if (seq != requestSeq.get()) {
+                return;
+            }
+            // IDLE first: its listener event then reaches the UI thread before any proxy-check failure
+            // that the stop itself causes, so VpnController never books that failure on a live state.
             setState(STATE_IDLE, null);
-        }, "singbox-disconnect");
-        t.start();
+            stopInternalQuietly();
+        });
     }
 
-    private void startInternal(String rawKey) throws Exception {
+    private void startInternal(Session session) throws Exception {
         synchronized (lock) {
             setState(STATE_CONNECTING, null);
             stopInternalQuietly();
@@ -131,7 +244,7 @@ public class SingBoxManager implements CommandServerHandler {
             ensureSetup();
 
             int port = Libbox.availablePort(11890);
-            String config = SingBoxConfigBuilder.build(rawKey, port);
+            String config = session.source.build(port);
             // Fail fast on a malformed config before touching the live proxy.
             Libbox.checkConfig(config);
 
@@ -141,15 +254,20 @@ public class SingBoxManager implements CommandServerHandler {
 
             commandServer = server;
             localPort = port;
-            activeKey = rawKey;
+            activeSession = session;
 
             // Mirror the sing-box core log stream into FileLog (so dial/reset/DNS lines are reachable
             // via the app's log export). Always on: the client also catches the core's shared-key
             // report (SingBoxLogClient.KEY_IN_USE_ELSEWHERE), which must work with logging off.
             // With logging off the core runs at warn, so the stream is only warnings and errors,
-            // and FileLog.d drops them unwritten.
-            logClient = new SingBoxLogClient();
+            // and FileLog.d drops them unwritten. For a subscription it also streams the group status.
+            logClient = new SingBoxLogClient(session);
             logClient.start();
+            if (session.sub != null) {
+                FileLog.d("singbox: subscription '" + session.sub.getDisplayName() + "' runs as a group of "
+                        + session.tagNames.size() + " servers"
+                        + (session.unresolved[0] > 0 ? ", " + session.unresolved[0] + " left out: their host had no address" : ""));
+            }
         }
 
         // Point tgnet at the local SOCKS5. Empty secret/user/pass = plain SOCKS5 path. Flag the
@@ -182,7 +300,7 @@ public class SingBoxManager implements CommandServerHandler {
                 commandServer = null;
             }
             localPort = -1;
-            activeKey = null;
+            activeSession = null;
         }
         // Clear the proxy so Telegram goes direct once the tunnel is down.
         try {
