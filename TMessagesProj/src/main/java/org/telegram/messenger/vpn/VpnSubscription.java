@@ -68,6 +68,8 @@ public class VpnSubscription {
     public int generation;
     /** What the running core reports about this group, null while it does not run. */
     public GroupStatus groupStatus;
+    /** Runtime, one start only: the server to put first in the group (a return to this subscription). */
+    public String firstName;
 
     /** The core's view of the group: which server carries new connections and each server's last delay. */
     public static final class GroupStatus {
@@ -79,6 +81,8 @@ public class VpnSubscription {
         public boolean pinned;
         /** Server name -> last urltest delay in ms. A server whose test failed has no entry. */
         public final HashMap<String, Integer> delays = new HashMap<>();
+        /** Server name -> when its delay was measured, unix seconds (core clock = device clock). */
+        public final HashMap<String, Long> times = new HashMap<>();
         /** Whether any test finished yet. Before that the core just uses the first server. */
         public boolean tested;
         /** Names of the servers in the running group; an included server missing here had no address at start. */

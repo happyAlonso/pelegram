@@ -2,6 +2,7 @@ package org.telegram.messenger.vpn;
 
 import android.content.Context;
 
+import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.ApplicationLoader;
 import org.telegram.messenger.BuildVars;
 import org.telegram.messenger.FileLog;
@@ -134,10 +135,31 @@ public class SingBoxManager implements CommandServerHandler {
         public final int[] unresolved = new int[1];
         /** UI thread: times VpnController moved the selector back to the app's choice in this session. */
         public int reconcileTries;
+        /**
+         * The subscription auto-switch left, carried as standby servers (SingBoxConfigBuilder.Standby),
+         * or null. Its servers are tested and pinged only when VpnController asks.
+         */
+        public final VpnSubscription home;
+        final List<VpnKeyInfo> homeServers;
+        /** Standby tag -> server name, filled when the config is built. */
+        public final Map<String, String> homeTagNames = new ConcurrentHashMap<>();
+        /** [0]: standby servers whose host name had no cached or quick address, resolved through the tunnel's DNS. */
+        final int[] standbyViaTunnelDns = new int[1];
+        /** Local port that reaches Telegram through the standby servers only, 0 without them. */
+        public volatile int probePort;
+        /** Set when the core did not start with the standby servers: this session runs without them. */
+        volatile boolean standbyOff;
 
-        Session(ConfigSource source, VpnSubscription sub) {
+        Session(ConfigSource source, VpnSubscription sub, VpnSubscription home, List<VpnKeyInfo> homeServers) {
             this.source = source;
             this.sub = sub;
+            this.home = homeServers == null || homeServers.isEmpty() ? null : home;
+            this.homeServers = this.home == null ? null : new ArrayList<>(homeServers);
+        }
+
+        SingBoxConfigBuilder.Standby standby() {
+            return home == null || standbyOff ? null
+                    : new SingBoxConfigBuilder.Standby(homeServers, probePort, homeTagNames, standbyViaTunnelDns);
         }
     }
 
@@ -150,16 +172,61 @@ public class SingBoxManager implements CommandServerHandler {
 
     /** Connect using a pasted VPN key. Runs off the caller's thread; a later request supersedes it. */
     public void connect(final String rawKey) {
-        connect(new Session(port -> SingBoxConfigBuilder.build(rawKey, port), null));
+        connect(rawKey, null, null);
+    }
+
+    /** As {@link #connect(String)}, carrying {@code homeServers} of {@code home} as standby servers. */
+    public void connect(final String rawKey, VpnSubscription home, List<VpnKeyInfo> homeServers) {
+        final Session[] holder = new Session[1];
+        holder[0] = new Session(port -> SingBoxConfigBuilder.build(rawKey, port, holder[0].standby()), null, home, homeServers);
+        connect(holder[0]);
     }
 
     /** Run a subscription's servers as one urltest group, see SingBoxConfigBuilder.buildGroup. */
     public void connectSubscription(VpnSubscription sub, List<VpnKeyInfo> servers, int intervalSec, String pinnedName) {
+        connectSubscription(sub, servers, intervalSec, pinnedName, null, null);
+    }
+
+    /** As above, carrying {@code homeServers} of another subscription {@code home} as standby servers. */
+    public void connectSubscription(VpnSubscription sub, List<VpnKeyInfo> servers, int intervalSec, String pinnedName,
+                                    VpnSubscription home, List<VpnKeyInfo> homeServers) {
         final List<VpnKeyInfo> snapshot = new ArrayList<>(servers);
         final Session[] holder = new Session[1];
         holder[0] = new Session(port -> SingBoxConfigBuilder.buildGroup(snapshot, port, intervalSec,
-                holder[0].tagNames, holder[0].unresolved, pinnedName), sub);
+                holder[0].tagNames, holder[0].unresolved, pinnedName, holder[0].standby()), sub, home, homeServers);
         connect(holder[0]);
+    }
+
+    /** Asks the core to test every standby server now. False when it cannot (no standby, no log client). */
+    public boolean requestStandbyTest() {
+        final SingBoxLogClient client = logClient;
+        Session session = activeSession;
+        if (client == null || !client.isConnected() || session == null || session.home == null || session.standbyOff) {
+            return false;
+        }
+        new Thread(() -> client.urlTest(SingBoxConfigBuilder.TAG_STANDBY), "singbox-urltest").start();
+        return true;
+    }
+
+    /**
+     * Points the standby selector at one server (by tag) and then calls {@code done} on the UI
+     * thread with whether that worked. Pings through the probe port go through that server.
+     */
+    public void selectStandby(String tag, final StandbyCallback done) {
+        final SingBoxLogClient client = logClient;
+        Session session = activeSession;
+        if (client == null || !client.isConnected() || session == null || session.home == null) {
+            AndroidUtilities.runOnUIThread(() -> done.onDone(false));
+            return;
+        }
+        new Thread(() -> {
+            boolean ok = client.selectOutbound(SingBoxConfigBuilder.TAG_STANDBY, tag);
+            AndroidUtilities.runOnUIThread(() -> done.onDone(ok));
+        }, "singbox-select").start();
+    }
+
+    public interface StandbyCallback {
+        void onDone(boolean ok);
     }
 
     /**
@@ -201,9 +268,23 @@ public class SingBoxManager implements CommandServerHandler {
             try {
                 startInternal(session);
             } catch (Throwable e) {
-                FileLog.e(e);
+                Throwable failure = e;
+                if (session.home != null && !session.standbyOff) {
+                    // The standby servers are extra: the entry that carries the traffic must not fail on them.
+                    FileLog.e("singbox: the core did not start with the standby servers of '"
+                            + session.home.getDisplayName() + "' (" + e + "), starting without them");
+                    session.standbyOff = true;
+                    session.homeTagNames.clear();
+                    try {
+                        startInternal(session);
+                        return;
+                    } catch (Throwable e2) {
+                        failure = e2;
+                    }
+                }
+                FileLog.e(failure);
                 stopInternalQuietly();
-                setState(STATE_ERROR, e.getMessage());
+                setState(STATE_ERROR, failure.getMessage());
             }
         });
     }
@@ -244,6 +325,7 @@ public class SingBoxManager implements CommandServerHandler {
             ensureSetup();
 
             int port = Libbox.availablePort(11890);
+            session.probePort = session.home != null && !session.standbyOff ? Libbox.availablePort(port + 1) : 0;
             String config = session.source.build(port);
             // Fail fast on a malformed config before touching the live proxy.
             Libbox.checkConfig(config);
@@ -267,6 +349,12 @@ public class SingBoxManager implements CommandServerHandler {
                 FileLog.d("singbox: subscription '" + session.sub.getDisplayName() + "' runs as a group of "
                         + session.tagNames.size() + " servers"
                         + (session.unresolved[0] > 0 ? ", " + session.unresolved[0] + " left out: their host had no address" : ""));
+            }
+            if (session.home != null && !session.standbyOff) {
+                FileLog.d("singbox: " + session.homeTagNames.size() + " servers of subscription '"
+                        + session.home.getDisplayName() + "' ride along as standby, tested only on request"
+                        + (session.standbyViaTunnelDns[0] > 0 ? ", " + session.standbyViaTunnelDns[0]
+                        + " of them resolved through this tunnel's DNS" : ""));
             }
         }
 

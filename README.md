@@ -33,6 +33,10 @@ need a separate VPN client just to use Telegram.
 - **Calls and the in-app browser go through the tunnel too.** 1:1 calls (both directions, including
   with stock Telegram users) and the in-app browser / web views route through the VPN, with DNS
   resolved on the far side of the tunnel.
+- **Subscription links.** An `https://` subscription link becomes one row in the VPN list. Its servers
+  run as one group that sends new connections through the fastest one, and the list updates every
+  hour. When auto-switch has moved to another key, the app checks the subscription through that key
+  from time to time and goes back to it once Telegram answers through it.
 - Powered by an embedded [sing-box](https://sing-box.sagernet.org/) core.
 
 ## How to use

@@ -288,6 +288,75 @@ public class VpnController implements SingBoxManager.StateListener {
      */
     private static final int MAX_UNRESOLVED_RESTARTS = 3;
 
+    /**
+     * The subscription entry the user chose last, by a tap on it (or as the first entry added).
+     * Auto-switch only ever moved away from an entry that failed and never back, so on 17 November
+     * the phone left the subscription in a 3-minute VLESS outage at 19:32 and then stayed on a
+     * Shadowsocks key with 1-2 s pings for the rest of the evening, while the subscription had
+     * given about 110 ms (user: "add going back to the subscription"). While auto-switch keeps
+     * another entry running, the core carries this subscription's servers as standby (see
+     * SingBoxConfigBuilder.Standby), and {@link #probeHome()} checks them from time to time
+     * without moving any traffic. A tap on an entry that is not a subscription clears it.
+     */
+    private VpnKeyInfo home;
+    /** Set while the app tries the way back: the entry it left for home, null otherwise. */
+    private VpnKeyInfo returnFrom;
+    private long returnStartElapsed;
+    /** Probes that found no way back since the app left home, the backoff level of {@link #PROBE_DELAYS_MS}. */
+    private int returnLevel;
+    /**
+     * Returns that home failed since the app left it. Each one costs an outage of up to
+     * {@link #RETURN_DEADLINE_MS}, so after one the probes keep at least {@link #RETURN_FAILED_DELAY_MS}
+     * apart, doubled per further failure up to an hour, and a network change no longer brings the
+     * next probe forward once two have failed.
+     */
+    private int returnFailures;
+    private static final long RETURN_FAILED_DELAY_MS = 15 * 60 * 1000L;
+    private static final long RETURN_FAILED_MAX_DELAY_MS = 60 * 60 * 1000L;
+    /** When the last return was confirmed; home leaving again sooner than {@link #HOME_HOLD_MS} after it counts as a failed return. */
+    private long homeCommitElapsed;
+    private static final long HOME_HOLD_MS = 15 * 60 * 1000L;
+    /**
+     * Delays between probes, by {@link #returnLevel}; the last one repeats. A probe tests every
+     * server once, so at the cap it costs a third of what the running subscription spends on its
+     * own tests at the default 5 minutes, and home is at most 15 minutes late after it recovers.
+     */
+    private static final long[] PROBE_DELAYS_MS = {5 * 60 * 1000L, 10 * 60 * 1000L, 15 * 60 * 1000L};
+    /** Next look when a probe cannot run now (no network, a trial or a call in progress). */
+    private static final long PROBE_RETRY_MS = 60 * 1000L;
+    /** A probe this soon after a network change, once the running entry's own trial is over. */
+    private static final long PROBE_AFTER_NETWORK_MS = 30 * 1000L;
+    /** Probes never start closer than this, however often the network changes. */
+    private static final long PROBE_MIN_SPACING_MS = 2 * 60 * 1000L;
+    /**
+     * When the test results are read after the request: the core tests 10 servers at a time with up
+     * to 15 s each, so a dead list takes longer than a live one. Stops at the first look with answers.
+     */
+    private static final long[] PROBE_TEST_LOOKS_MS = {10 * 1000L, 30 * 1000L, 55 * 1000L, 80 * 1000L};
+    /** How long the Telegram ping through the standby may stay unanswered. */
+    private static final long PROBE_PING_TIMEOUT_MS = 20 * 1000L;
+    /**
+     * Home must answer a ping this soon after the return, or the app goes back. A trial that ends
+     * without a verdict (a timeout in the background is not counted, see measurePing) would
+     * otherwise leave it on a silent tunnel.
+     */
+    private static final long RETURN_DEADLINE_MS = 90 * 1000L;
+    /** 0 no probe, 1 the standby servers are being tested, 2 Telegram is pinged through one of them. */
+    private int probeStage;
+    private int probeLook;
+    /** Bumped whenever a probe starts or is cancelled, so a late result of an older one is dropped. */
+    private int probeToken;
+    private long probeStartElapsed;
+    /** Unix seconds when the probe asked for the test; older results do not count. */
+    private long probeRequestSec;
+    private SingBoxManager.Session probeSession;
+    /** The latest standby test results and the core session they came from. */
+    private VpnSubscription.GroupStatus standbyStatus;
+    private SingBoxManager.Session standbySession;
+    private final Runnable probeRunnable = this::probeHome;
+    private final Runnable probeLookRunnable = this::lookAtStandbyTest;
+    private final Runnable returnDeadlineRunnable = this::onReturnDeadline;
+
     public interface SubscriptionCallback {
         /** On the UI thread. error is null on success. */
         void onDone(VpnSubscription sub, String error, int servers);
@@ -359,6 +428,13 @@ public class VpnController implements SingBoxManager.StateListener {
         } else if (!vpnList.isEmpty()) {
             currentVpn = vpnList.get(0);
         }
+        // Before the reconnect: the core of another entry carries home's servers as standby.
+        if (p.contains("home_sub")) {
+            VpnSubscription homeSub = findSubscriptionById(p.getString("home_sub", ""));
+            home = homeSub == null ? null : entryOf(homeSub);
+        } else if (currentVpn != null && currentVpn.sub != null) {
+            home = currentVpn; // first start of a build that knows home
+        }
         // The core doesn't survive a process restart, so bring the tunnel back up if it was on.
         if (enabled && currentVpn != null && (currentVpn.sub != null || !TextUtils.isEmpty(currentVpn.key))
                 && SingBoxManager.getInstance().getState() == SingBoxManager.STATE_IDLE) {
@@ -366,6 +442,7 @@ public class VpnController implements SingBoxManager.StateListener {
         }
         updateBackgroundKeepAlive();
         scheduleSubscriptionCheck(SUBSCRIPTION_FIRST_CHECK_MS);
+        scheduleProbe(PROBE_DELAYS_MS[0]);
     }
 
     public void save() {
@@ -402,6 +479,7 @@ public class VpnController implements SingBoxManager.StateListener {
                 .putBoolean("route_calls", routeCalls)
                 .putInt("autoswitch_timeout_v2", autoSwitchTimeoutIndex)
                 .putInt("current", currentVpn == null ? -1 : vpnList.indexOf(currentVpn))
+                .putString("home_sub", home != null && home.sub != null ? home.sub.id : "")
                 .apply();
     }
 
@@ -420,8 +498,15 @@ public class VpnController implements SingBoxManager.StateListener {
             silentBackgroundTicks = 0;
             backgroundPingsWithoutTraffic = 0;
             scheduleHealthCheck();
+            returnLevel = 0;
+            returnFailures = 0;
+            homeCommitElapsed = 0;
+            scheduleProbe(PROBE_DELAYS_MS[0]);
         } else {
             AndroidUtilities.cancelRunOnUIThread(healthCheckRunnable);
+            // Off means no automatic move at all: a return in progress stays where it is now.
+            endReturn();
+            cancelProbe();
         }
     }
 
@@ -508,6 +593,13 @@ public class VpnController implements SingBoxManager.StateListener {
 
     public void deleteVpn(VpnKeyInfo info) {
         boolean wasCurrent = info == currentVpn;
+        if (info == home || info == returnFrom) {
+            endReturn();
+            cancelProbe();
+            if (info == home) {
+                home = null;
+            }
+        }
         if (info.sub != null) {
             info.sub.generation++; // a download still in flight must not bring it back
             subscriptions.remove(info.sub);
@@ -537,6 +629,13 @@ public class VpnController implements SingBoxManager.StateListener {
         trialAfterConnect = false;
         // A fresh try: the core reports the other device again within a minute if it is still on the key
         info.keyInUseElsewhereElapsed = 0;
+        // The user's choice: a subscription becomes home, anything else means no way back to one.
+        endReturn();
+        cancelProbe();
+        home = info.sub != null ? info : null;
+        returnLevel = 0;
+        returnFailures = 0;
+        homeCommitElapsed = 0;
         save();
         if (enabled) {
             // before notifyList, so the refresh already shows the cleared ping of the new session
@@ -554,8 +653,14 @@ public class VpnController implements SingBoxManager.StateListener {
         silentBackgroundTicks = 0;
         backgroundPingsWithoutTraffic = 0;
         trialAfterConnect = false;
+        endReturn();
+        cancelProbe();
+        returnLevel = 0;
+        returnFailures = 0;
+        homeCommitElapsed = 0;
         if (enabled && currentVpn != null) {
             reconnect();
+            scheduleProbe(PROBE_DELAYS_MS[0]);
         } else {
             stopCore();
         }
@@ -584,9 +689,33 @@ public class VpnController implements SingBoxManager.StateListener {
         pendingRestart = false;
         AndroidUtilities.cancelRunOnUIThread(pendingRestartRunnable);
         groupRetestRequested = false;
+        // A probe in flight measured the core that is going away.
+        if (probeStage != 0) {
+            probeStage = 0;
+            probeToken++;
+            AndroidUtilities.cancelRunOnUIThread(probeLookRunnable);
+            scheduleProbe(PROBE_RETRY_MS);
+        }
+        // While another entry runs, it carries home's servers as standby (see probeHome).
+        VpnSubscription standby = null;
+        List<VpnKeyInfo> standbyServers = null;
+        if (home != null && home != currentVpn && home.sub != null && vpnList.contains(home)) {
+            standbyServers = home.sub.includedServers();
+            standby = standbyServers.isEmpty() ? null : home.sub;
+        }
         if (currentVpn != null && currentVpn.sub != null) {
             VpnSubscription sub = currentVpn.sub;
-            List<VpnKeyInfo> servers = sub.includedServers();
+            List<VpnKeyInfo> servers = new ArrayList<>(sub.includedServers());
+            if (sub.firstName != null) {
+                // a return: the server Telegram just answered through leads (see startReturn)
+                for (int i = 1; i < servers.size(); i++) {
+                    if (sub.firstName.equals(servers.get(i).name)) {
+                        servers.add(0, servers.remove(i));
+                        break;
+                    }
+                }
+                sub.firstName = null;
+            }
             if (servers.isEmpty()) {
                 // the build fails with a clear message, the row turns red
                 String what = sub.servers.isEmpty() ? "has no servers yet" : "has every server excluded";
@@ -602,9 +731,9 @@ public class VpnController implements SingBoxManager.StateListener {
                     break;
                 }
             }
-            SingBoxManager.getInstance().connectSubscription(sub, servers, sub.getIntervalSec(), pinned);
+            SingBoxManager.getInstance().connectSubscription(sub, servers, sub.getIntervalSec(), pinned, standby, standbyServers);
         } else if (currentVpn != null && !TextUtils.isEmpty(currentVpn.key)) {
-            SingBoxManager.getInstance().connect(currentVpn.key);
+            SingBoxManager.getInstance().connect(currentVpn.key, standby, standbyServers);
         }
     }
 
@@ -678,7 +807,11 @@ public class VpnController implements SingBoxManager.StateListener {
                 for (VpnSubscription s : subscriptions) {
                     s.groupStatus = null; // the next core starts its tests from scratch
                 }
-                if (state == SingBoxManager.STATE_ERROR && enabled && autoSwitch && vpnList.size() > 1) {
+                if (state == SingBoxManager.STATE_ERROR && enabled && returnFrom != null) {
+                    // home's core did not start: straight back to the entry that worked
+                    AndroidUtilities.cancelRunOnUIThread(returnDeadlineRunnable);
+                    AndroidUtilities.runOnUIThread(returnDeadlineRunnable, 1000L);
+                } else if (state == SingBoxManager.STATE_ERROR && enabled && autoSwitch && vpnList.size() > 1) {
                     AndroidUtilities.cancelRunOnUIThread(autoSwitchRunnable);
                     AndroidUtilities.runOnUIThread(autoSwitchRunnable, 1000L);
                 }
@@ -822,6 +955,9 @@ public class VpnController implements SingBoxManager.StateListener {
                     }
                     stopTrial();
                 }
+                if (info == home && returnFrom != null) {
+                    commitReturn("it answered " + (SystemClock.elapsedRealtime() - returnStartElapsed) / 1000 + " s after the return");
+                }
                 // The tunnel now carries traffic, so a due subscription can download through it. Not
                 // on CONNECTED: the core reports that before the server handshake is done.
                 if (!subscriptions.isEmpty()) {
@@ -955,6 +1091,13 @@ public class VpnController implements SingBoxManager.StateListener {
         if (connected) {
             startTrial();
             trialAfterNetworkChange = true;
+        }
+        // Away from home, the new network may reach it again. The probe waits for the trial above.
+        // Only with a lap (at most every 15 min), so a phone on the move does not test every 2 min.
+        if (isAwayFromHome() && returnFailures < 2 && lap) {
+            returnLevel = 0;
+            cancelProbe();
+            scheduleProbe(PROBE_AFTER_NETWORK_MS);
         }
     }
 
@@ -1144,6 +1287,11 @@ public class VpnController implements SingBoxManager.StateListener {
             }
             return;
         }
+        if (returnFrom != null) {
+            // home failed again right after the return: back to the entry that worked, not the walk
+            returnFailed("auto-switch gave up on it");
+            return;
+        }
         long now = SystemClock.elapsedRealtime();
         // Every caller switches because the current server failed: pings, downloads giving up, a core
         // error or a failed trial. Remember it, so the rotation skips this server for a while.
@@ -1152,6 +1300,7 @@ public class VpnController implements SingBoxManager.StateListener {
         if (next == null || next == currentVpn) {
             return;
         }
+        boolean leavingHome = currentVpn == home;
         boolean fresh = !failedRecently(next, now);
         boolean workedRecently = lastTunnelWorkedElapsed != 0 && now - lastTunnelWorkedElapsed < FAILED_SERVER_SKIP_MS;
         boolean trial = fresh && (workedRecently || now < networkLapUntilElapsed);
@@ -1171,6 +1320,21 @@ public class VpnController implements SingBoxManager.StateListener {
         save();
         reconnect(); // before notifyList, so the refresh already shows the cleared ping
         notifyList();
+        if (leavingHome) {
+            // Home failed again soon after a return: that return counts as failed too, or a home
+            // that answers one ping and then dies would pull the app back every few minutes.
+            boolean shortStay = homeCommitElapsed != 0 && now - homeCommitElapsed < HOME_HOLD_MS;
+            if (shortStay) {
+                returnFailures++;
+            } else {
+                returnFailures = 0;
+            }
+            homeCommitElapsed = 0;
+            returnLevel = 0;
+            scheduleProbe(nextProbeDelay());
+        } else if (next == home) {
+            cancelProbe(); // the walk itself came back home
+        }
     }
 
     private boolean hasFreshServer(long now) {
@@ -1263,6 +1427,10 @@ public class VpnController implements SingBoxManager.StateListener {
         int steps = trialStep;
         boolean afterNetworkChange = trialAfterNetworkChange;
         stopTrial();
+        if (returnFrom != null) {
+            returnFailed(steps + " trial pings failed");
+            return;
+        }
         if (afterNetworkChange && currentVpn.lastWorkedElapsed != 0 && !hasFreshServer(SystemClock.elapsedRealtime())) {
             // Every other server failed within the last half hour, and this one has worked before, so
             // the new network is most likely still cut off from all of them. Switching now would only
@@ -1290,6 +1458,384 @@ public class VpnController implements SingBoxManager.StateListener {
      */
     private boolean isCallActive() {
         return VoIPService.getSharedInstance() != null;
+    }
+
+    // ---- the way back to home (see home) ----
+
+    /** Auto-switch runs another entry than home, and no return is under way. */
+    private boolean isAwayFromHome() {
+        return enabled && autoSwitch && home != null && returnFrom == null && currentVpn != null
+                && currentVpn != home && vpnList.contains(home);
+    }
+
+    private long nextProbeDelay() {
+        long delay = PROBE_DELAYS_MS[Math.min(returnLevel, PROBE_DELAYS_MS.length - 1)];
+        if (returnFailures > 0) {
+            delay = Math.max(delay, Math.min(RETURN_FAILED_MAX_DELAY_MS, RETURN_FAILED_DELAY_MS << Math.min(returnFailures - 1, 4)));
+        }
+        return delay;
+    }
+
+    /** (Re)arms the next probe, if the app is away from home. A plain main-looper post, like the health tick. */
+    private void scheduleProbe(long delayMs) {
+        AndroidUtilities.cancelRunOnUIThread(probeRunnable);
+        if (isAwayFromHome()) {
+            AndroidUtilities.runOnUIThread(probeRunnable, delayMs);
+        }
+    }
+
+    private void cancelProbe() {
+        AndroidUtilities.cancelRunOnUIThread(probeRunnable);
+        AndroidUtilities.cancelRunOnUIThread(probeLookRunnable);
+        if (probeStage != 0) {
+            probeStage = 0;
+            probeToken++;
+        }
+    }
+
+    /** The return is over, one way or the other: it no longer needs its deadline. */
+    private void endReturn() {
+        returnFrom = null;
+        AndroidUtilities.cancelRunOnUIThread(returnDeadlineRunnable);
+    }
+
+    /** Why the last probe could not run, logged once per reason rather than every minute. */
+    private String lastProbeWait;
+
+    /**
+     * Checks whether home works again, without moving any traffic: the core of the running entry
+     * tests home's standby servers (stage 1), then Telegram is pinged through the fastest of them on
+     * the standby port (stage 2). Only that answer starts the return. A test of the servers alone
+     * is not enough: on 17 November at 19:31 one server answered the core's test in 250 ms while
+     * every Telegram connection through it ended after 1.4 s.
+     */
+    private void probeHome() {
+        if (!isAwayFromHome() || probeStage != 0) {
+            return;
+        }
+        long now = SystemClock.elapsedRealtime();
+        if (probeStartElapsed != 0 && now - probeStartElapsed < PROBE_MIN_SPACING_MS) {
+            scheduleProbe(PROBE_MIN_SPACING_MS - (now - probeStartElapsed));
+            return;
+        }
+        SingBoxManager m = SingBoxManager.getInstance();
+        SingBoxManager.Session session = m.getActiveSession();
+        boolean proven = currentVpn.available || (currentVpn.lastWorkedElapsed != 0
+                && now - currentVpn.lastWorkedElapsed < 10 * 60 * 1000L);
+        String wait = null;
+        if (!ApplicationLoader.isNetworkOnline()) {
+            wait = "the device is offline";
+        } else if (m.getState() != SingBoxManager.STATE_CONNECTED || session == null) {
+            wait = "the tunnel is not connected";
+        } else if (trialStep >= 0) {
+            wait = "'" + currentVpn.getDisplayName() + "' is on trial";
+        } else if (!proven) {
+            wait = "'" + currentVpn.getDisplayName() + "' has not answered yet";
+        } else if (isCallActive()) {
+            wait = "a call is in progress";
+        }
+        if (wait != null) {
+            if (BuildVars.LOGS_ENABLED && !wait.equals(lastProbeWait)) {
+                FileLog.d("VpnController: way back to '" + home.getDisplayName() + "' not checked now, " + wait);
+            }
+            lastProbeWait = wait;
+            scheduleProbe(PROBE_RETRY_MS);
+            return;
+        }
+        lastProbeWait = null;
+        if (session.home != home.sub || session.homeTagNames.isEmpty() || session.probePort <= 0) {
+            // The core started before home was set, or home had no server to carry then.
+            returnLevel++;
+            if (BuildVars.LOGS_ENABLED) {
+                FileLog.d("VpnController: way back to '" + home.getDisplayName() + "' not checked, the running core"
+                        + " carries none of its servers; next look in " + nextProbeDelay() / 60000 + " min");
+            }
+            scheduleProbe(nextProbeDelay());
+            return;
+        }
+        if (!sameServers(session.homeServers, home.sub.includedServers())) {
+            // An update or the exclude list changed home's servers since this core started: a test of
+            // the old ones says little, and a server it passed may not be in the group that the
+            // return starts. One restart of the running entry carries the current list.
+            if (BuildVars.LOGS_ENABLED) {
+                FileLog.d("VpnController: the servers of '" + home.getDisplayName() + "' changed since '"
+                        + currentVpn.getDisplayName() + "' started, restarting it to carry the new list");
+            }
+            reconnect();
+            scheduleProbe(PROBE_RETRY_MS);
+            return;
+        }
+        probeStage = 1;
+        probeToken++;
+        probeLook = 0;
+        probeSession = session;
+        probeStartElapsed = now;
+        probeRequestSec = System.currentTimeMillis() / 1000 - 1;
+        if (!m.requestStandbyTest()) {
+            probeStage = 0;
+            scheduleProbe(PROBE_RETRY_MS);
+            return;
+        }
+        if (BuildVars.LOGS_ENABLED) {
+            FileLog.d("VpnController: away from '" + home.getDisplayName() + "' on '" + currentVpn.getDisplayName()
+                    + "' - testing its " + session.homeTagNames.size() + " servers through the standby (check "
+                    + (returnLevel + 1) + ")");
+        }
+        AndroidUtilities.runOnUIThread(probeLookRunnable, PROBE_TEST_LOOKS_MS[0]);
+    }
+
+    /** Same servers, ignoring order and the sni/sid that BlancVPN rotates on every download. */
+    private static boolean sameServers(List<VpnKeyInfo> a, List<VpnKeyInfo> b) {
+        if (a == null || b == null || a.size() != b.size()) {
+            return false;
+        }
+        List<String> ka = new ArrayList<>();
+        List<String> kb = new ArrayList<>();
+        for (VpnKeyInfo s : a) {
+            ka.add(s.key);
+        }
+        for (VpnKeyInfo s : b) {
+            kb.add(s.key);
+        }
+        return VpnSubscriptionParser.identity(ka).equals(VpnSubscriptionParser.identity(kb));
+    }
+
+    /** Stage 1 result: the fastest standby server that answered this test, then the Telegram ping through it. */
+    private void lookAtStandbyTest() {
+        if (probeStage != 1) {
+            return;
+        }
+        SingBoxManager m = SingBoxManager.getInstance();
+        if (probeSession != m.getActiveSession() || m.getState() != SingBoxManager.STATE_CONNECTED) {
+            probeStage = 0;
+            scheduleProbe(PROBE_RETRY_MS);
+            return;
+        }
+        VpnSubscription.GroupStatus status = standbySession == probeSession ? standbyStatus : null;
+        String best = null;
+        int bestDelay = Integer.MAX_VALUE;
+        int answered = 0;
+        if (status != null) {
+            for (java.util.Map.Entry<String, Integer> e : status.delays.entrySet()) {
+                Long time = status.times.get(e.getKey());
+                if (time == null || time < probeRequestSec) {
+                    continue; // from an earlier test
+                }
+                answered++;
+                if (e.getValue() < bestDelay) {
+                    best = e.getKey();
+                    bestDelay = e.getValue();
+                }
+            }
+        }
+        int total = probeSession.homeTagNames.size();
+        if (best == null) {
+            if (++probeLook < PROBE_TEST_LOOKS_MS.length) {
+                AndroidUtilities.runOnUIThread(probeLookRunnable, PROBE_TEST_LOOKS_MS[probeLook] - PROBE_TEST_LOOKS_MS[probeLook - 1]);
+                return;
+            }
+            probeFailed("none of its " + total + " servers answered the test");
+            return;
+        }
+        String tag = null;
+        for (java.util.Map.Entry<String, String> e : probeSession.homeTagNames.entrySet()) {
+            if (best.equals(e.getValue())) {
+                tag = e.getKey();
+                break;
+            }
+        }
+        if (tag == null) {
+            probeFailed("its fastest server has no tag in the core");
+            return;
+        }
+        probeStage = 2;
+        final int token = probeToken;
+        final String server = best;
+        if (BuildVars.LOGS_ENABLED) {
+            FileLog.d("VpnController: way back to '" + home.getDisplayName() + "': " + answered + " of " + total
+                    + " servers answered the test, fastest '" + best + "' (" + bestDelay + " ms) - pinging Telegram through it");
+        }
+        m.selectStandby(tag, ok -> {
+            if (token != probeToken || probeStage != 2) {
+                return;
+            }
+            if (!ok) {
+                probeFailed("the core did not switch its standby to '" + server + "'");
+                return;
+            }
+            pingThroughStandby(token, server);
+        });
+    }
+
+    /** Stage 2: a Telegram ping on the standby port, which reaches Telegram through home's server only. */
+    private void pingThroughStandby(final int token, final String server) {
+        final int startToken = pingToken;
+        final SingBoxManager.Session session = probeSession;
+        final boolean[] answered = new boolean[1];
+        final Runnable[] deadline = new Runnable[1];
+        final RequestTimeDelegate onAnswer = time -> {
+            if (answered[0]) {
+                return;
+            }
+            answered[0] = true;
+            AndroidUtilities.cancelRunOnUIThread(deadline[0]);
+            if (token != probeToken || probeStage != 2) {
+                return; // cancelled meanwhile
+            }
+            probeStage = 0;
+            if (startToken != pingToken || session != SingBoxManager.getInstance().getActiveSession()) {
+                // The core restarted while the ping ran; the answer may come from the next core,
+                // which can listen on the same port.
+                if (BuildVars.LOGS_ENABLED) {
+                    FileLog.d("VpnController: ping through the standby dropped, the tunnel changed while it ran");
+                }
+                scheduleProbe(PROBE_RETRY_MS);
+                return;
+            }
+            if (time < 0) {
+                probeFailed("Telegram did not answer through '" + server + "'" + (time == PING_TIMED_OUT ? " within "
+                        + PROBE_PING_TIMEOUT_MS / 1000 + " s" : ""));
+                return;
+            }
+            if (!isAwayFromHome() || isCallActive()) {
+                scheduleProbe(PROBE_RETRY_MS);
+                return;
+            }
+            if (BuildVars.LOGS_ENABLED) {
+                FileLog.d("VpnController: Telegram answered through '" + server + "' of '" + home.getDisplayName() + "' in "
+                        + time + " ms - going back from '" + currentVpn.getDisplayName() + "'");
+            }
+            startReturn(server);
+        };
+        deadline[0] = () -> onAnswer.run(PING_TIMED_OUT);
+        AndroidUtilities.runOnUIThread(deadline[0], PROBE_PING_TIMEOUT_MS);
+        ConnectionsManager.getInstance(UserConfig.selectedAccount).checkProxy(ProxySettings.builder()
+                .setType(ProxySettings.Type.SOCKS5)
+                .setAddress("127.0.0.1")
+                .setPort(session.probePort)
+                .build(), time -> AndroidUtilities.runOnUIThread(() -> onAnswer.run(time)));
+    }
+
+    private void probeFailed(String reason) {
+        probeStage = 0;
+        returnLevel++;
+        if (BuildVars.LOGS_ENABLED) {
+            FileLog.d("VpnController: no way back to '" + home.getDisplayName() + "' yet: " + reason
+                    + "; next check in " + nextProbeDelay() / 60000 + " min");
+        }
+        scheduleProbe(nextProbeDelay());
+    }
+
+    /**
+     * Moves the tunnel back to home, with {@code provenServer} (the one Telegram just answered
+     * through) first in the group: until its first test round ends the group uses its first
+     * server, and with dead servers in the list that round takes up to 75 s. Home has to answer
+     * within {@link #RETURN_DEADLINE_MS}, or the app goes back.
+     */
+    private void startReturn(String provenServer) {
+        if (home.sub != null) {
+            if (home.sub.pinnedName != null) {
+                // a pick would hold the group on one server, which may be the dead one
+                home.sub.pinnedName = null;
+                home.sub.pinnedAtElapsed = 0;
+            }
+            home.sub.firstName = provenServer;
+        }
+        returnFrom = currentVpn;
+        returnStartElapsed = SystemClock.elapsedRealtime();
+        currentVpn = home;
+        consecutivePingFailures = 0;
+        silentBackgroundTicks = 0;
+        backgroundPingsWithoutTraffic = 0;
+        mediaStallsSinceProgress = 0; // stalls on the old entry, or caused by this restart, are not home's
+        trialAfterConnect = true;
+        save();
+        reconnect();
+        notifyList();
+        AndroidUtilities.cancelRunOnUIThread(returnDeadlineRunnable);
+        AndroidUtilities.runOnUIThread(returnDeadlineRunnable, RETURN_DEADLINE_MS);
+    }
+
+    /** The return holds: the backoff starts over, and a failure of home in the next {@link #HOME_HOLD_MS} still counts. */
+    private void commitReturn(String why) {
+        if (BuildVars.LOGS_ENABLED) {
+            FileLog.d("VpnController: back on '" + home.getDisplayName() + "', " + why);
+        }
+        endReturn();
+        returnLevel = 0;
+        homeCommitElapsed = SystemClock.elapsedRealtime();
+    }
+
+    /** The return deadline, or a core error during the return (posted from onSingBoxState). */
+    private void onReturnDeadline() {
+        if (returnFrom == null) {
+            return;
+        }
+        SingBoxManager m = SingBoxManager.getInstance();
+        if (m.getState() == SingBoxManager.STATE_CONNECTED && currentVpn == home) {
+            // In the background a ping that times out is not counted, so the trial can end without
+            // a verdict while home carries Telegram's traffic. That traffic is the better proof.
+            if (tgnetBytesSinceLastTick || home.lastWorkedElapsed > returnStartElapsed) {
+                commitReturn("Telegram traffic arrived through it, no ping answered within " + RETURN_DEADLINE_MS / 1000 + " s");
+                return;
+            }
+            if (!ApplicationLoader.isNetworkOnline()) {
+                // nothing to judge home by while offline; the change that brings the network back puts it on trial
+                AndroidUtilities.runOnUIThread(returnDeadlineRunnable, PENDING_RESTART_CHECK_MS);
+                return;
+            }
+        }
+        returnFailed(m.getState() == SingBoxManager.STATE_ERROR
+                ? "the core did not start" : "no answer within " + RETURN_DEADLINE_MS / 1000 + " s");
+    }
+
+    /** Home failed right after the return: back to the entry that worked before it, not through the list walk. */
+    private void returnFailed(String reason) {
+        AndroidUtilities.cancelRunOnUIThread(returnDeadlineRunnable);
+        if (returnFrom == null) {
+            return;
+        }
+        if (isCallActive()) {
+            // a restart now would break the call; look again when it may be over
+            AndroidUtilities.runOnUIThread(returnDeadlineRunnable, PENDING_RESTART_CHECK_MS);
+            return;
+        }
+        VpnKeyInfo back = returnFrom;
+        returnFrom = null;
+        returnLevel++;
+        returnFailures++;
+        mediaStallsSinceProgress = 0;
+        if (home != null) {
+            home.lastFailedElapsed = SystemClock.elapsedRealtime(); // the list walk skips it for a while
+        }
+        if (!enabled || !vpnList.contains(back)) {
+            return;
+        }
+        if (BuildVars.LOGS_ENABLED) {
+            FileLog.d("VpnController: return to '" + (home != null ? home.getDisplayName() : "?") + "' failed (" + reason + ") - back to '"
+                    + back.getDisplayName() + "', next check in " + nextProbeDelay() / 60000 + " min");
+        }
+        currentVpn = back;
+        consecutivePingFailures = 0;
+        silentBackgroundTicks = 0;
+        backgroundPingsWithoutTraffic = 0;
+        trialAfterConnect = true;
+        save();
+        reconnect();
+        notifyList();
+        scheduleProbe(nextProbeDelay());
+    }
+
+    /** Standby test results from the core's log client, on a gomobile thread. */
+    static void onStandbyStatus(SingBoxManager.Session session, VpnSubscription.GroupStatus status) {
+        AndroidUtilities.runOnUIThread(() -> {
+            VpnController controller = instance;
+            if (controller == null || session != SingBoxManager.getInstance().getActiveSession()) {
+                return;
+            }
+            controller.standbySession = session;
+            controller.standbyStatus = status;
+        });
     }
 
     // ---- subscriptions ----
@@ -1451,6 +1997,7 @@ public class VpnController implements SingBoxManager.StateListener {
                 boolean pick = currentVpn == null;
                 if (pick) {
                     currentVpn = entry;
+                    home = entry;
                 }
                 save();
                 notifyList();

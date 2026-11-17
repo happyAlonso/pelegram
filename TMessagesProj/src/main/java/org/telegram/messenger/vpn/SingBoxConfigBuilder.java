@@ -16,9 +16,16 @@ import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.zip.Inflater;
 
 /**
@@ -63,9 +70,53 @@ public class SingBoxConfigBuilder {
 
     public static final String TAG_PROXY = "proxy-out";
     public static final String TAG_SOCKS_IN = "socks-in";
+    private static final String TAG_DNS = "proxy-dns";
+
+    /** Selector over the standby servers of the subscription auto-switch left, see {@link Standby}. */
+    public static final String TAG_STANDBY = "home";
+    /** Local inbound whose connections go through {@link #TAG_STANDBY} only. */
+    private static final String TAG_PROBE_IN = "probe-in";
+
+    /**
+     * The servers of the subscription that auto-switch moved away from, carried passively by the
+     * core of the entry that runs instead: one outbound per server (tags h00, h01, ...), a selector
+     * {@link #TAG_STANDBY} over them, and a second local inbound on {@code port} that routes to
+     * that selector and nowhere else. Nothing else routes there, and a selector runs no tests of
+     * its own, so they cost nothing until VpnController asks the core to test them and pings
+     * Telegram through the second port. Only when that ping answers does the app go back to the
+     * subscription, so a check that fails costs no outage.
+     */
+    public static final class Standby {
+        final List<VpnKeyInfo> servers;
+        final int port;
+        /** Filled with tag -> server name. */
+        final Map<String, String> tagNames;
+        /** [0] is set to the number of servers left to the tunnel's DNS. */
+        final int[] viaTunnelDns;
+
+        public Standby(List<VpnKeyInfo> servers, int port, Map<String, String> tagNames, int[] viaTunnelDns) {
+            this.servers = servers;
+            this.port = port;
+            this.tagNames = tagNames;
+            this.viaTunnelDns = viaTunnelDns;
+        }
+    }
+
+    /**
+     * Host -> address from every successful device lookup in this process, so the standby servers of
+     * a subscription get the addresses its own group start resolved, without a lookup of their own.
+     */
+    private static final ConcurrentHashMap<String, String> RESOLVED_HOSTS = new ConcurrentHashMap<>();
+    /** The most a start waits for device lookups of standby hosts that are not cached yet. */
+    private static final long STANDBY_RESOLVE_MS = 1500;
 
     /** Build the full sing-box config for a key, with the SOCKS inbound on the given port. */
     public static String build(String rawKey, int localPort) throws Exception {
+        return build(rawKey, localPort, null);
+    }
+
+    /** As {@link #build(String, int)}, plus the standby servers when {@code standby} is not null. */
+    public static String build(String rawKey, int localPort, Standby standby) throws Exception {
         JSONObject outbound = buildOutbound(rawKey);
         // The core's default resolver on Android points at a non-existent local :53 and fails, so a
         // hostname server (e.g. Outline keys) never connects. Resolve it here with the device
@@ -95,7 +146,96 @@ public class SingBoxConfigBuilder {
         } else {
             root.put("outbounds", new JSONArray().put(outbound).put(directOutbound()));
         }
+        addStandby(root, standby);
         return root.toString();
+    }
+
+    /**
+     * Appends the standby servers, selector, inbound and route rule (see {@link Standby}). Server
+     * hosts get the address the device resolver gave earlier in this process (the subscription's
+     * own group start resolves them all), else whatever a parallel lookup returns within
+     * {@link #STANDBY_RESOLVE_MS}: an unbounded lookup here would hold up the start of the entry
+     * that is about to carry the traffic. A host still without an address is resolved when a test
+     * dials it, through the running tunnel's DNS, which is UDP and may not pass every tunnel.
+     */
+    private static void addStandby(JSONObject root, Standby standby) throws JSONException {
+        if (standby == null || standby.port <= 0) {
+            return;
+        }
+        JSONArray outbounds = root.getJSONArray("outbounds");
+        JSONArray members = new JSONArray();
+        List<JSONObject> built = new ArrayList<>();
+        List<String> builtTags = new ArrayList<>();
+        HashSet<String> hosts = new HashSet<>();
+        for (int i = 0; i < standby.servers.size(); i++) {
+            VpnKeyInfo server = standby.servers.get(i);
+            JSONObject o;
+            try {
+                o = buildOutbound(server.key);
+            } catch (Exception e) {
+                continue;
+            }
+            if ("wireguard".equals(o.optString("type"))) {
+                continue; // an endpoint, not an outbound: it cannot be a selector member
+            }
+            String tag = String.format(Locale.ROOT, "h%02d", i);
+            o.put("tag", tag);
+            String host = o.optString("server", "");
+            if (!TextUtils.isEmpty(host) && !isNumericAddress(host)) {
+                hosts.add(host);
+            }
+            built.add(o);
+            builtTags.add(tag);
+            standby.tagNames.put(tag, server.name);
+        }
+        Map<String, String> addresses = resolveQuickly(hosts);
+        int viaTunnelDns = 0;
+        for (int i = 0; i < built.size(); i++) {
+            JSONObject o = built.get(i);
+            String host = o.optString("server", "");
+            if (hosts.contains(host)) {
+                String ip = addresses.get(host);
+                if (ip != null) {
+                    o.put("server", ip);
+                } else {
+                    o.put("domain_resolver", TAG_DNS);
+                    viaTunnelDns++;
+                }
+            }
+            outbounds.put(o);
+            members.put(builtTags.get(i));
+        }
+        if (standby.viaTunnelDns != null) {
+            standby.viaTunnelDns[0] = viaTunnelDns;
+        }
+        if (members.length() == 0) {
+            return;
+        }
+        JSONObject selector = new JSONObject();
+        selector.put("type", "selector");
+        selector.put("tag", TAG_STANDBY);
+        selector.put("outbounds", members);
+        selector.put("interrupt_exist_connections", false);
+        outbounds.put(selector);
+
+        JSONObject probeIn = new JSONObject();
+        probeIn.put("type", "mixed");
+        probeIn.put("tag", TAG_PROBE_IN);
+        probeIn.put("listen", "127.0.0.1");
+        probeIn.put("listen_port", standby.port);
+        root.getJSONArray("inbounds").put(probeIn);
+
+        JSONObject route = root.getJSONObject("route");
+        JSONArray rules = route.optJSONArray("rules");
+        if (rules == null) {
+            rules = new JSONArray();
+            route.put("rules", rules);
+        }
+        JSONObject rule = new JSONObject();
+        rule.put("inbound", new JSONArray().put(TAG_PROBE_IN));
+        rule.put("action", "route");
+        rule.put("outbound", TAG_STANDBY);
+        rules.put(rule);
     }
 
     /** Tag of the urltest group inside a subscription's selector ({@link #TAG_PROXY}). */
@@ -125,6 +265,12 @@ public class SingBoxConfigBuilder {
      */
     public static String buildGroup(List<VpnKeyInfo> servers, int localPort, int intervalSec, Map<String, String> tagNames,
                                     int[] unresolvedOut, String pinnedName) throws Exception {
+        return buildGroup(servers, localPort, intervalSec, tagNames, unresolvedOut, pinnedName, null);
+    }
+
+    /** As above, plus the standby servers of another subscription when {@code standby} is not null. */
+    public static String buildGroup(List<VpnKeyInfo> servers, int localPort, int intervalSec, Map<String, String> tagNames,
+                                    int[] unresolvedOut, String pinnedName, Standby standby) throws Exception {
         if (servers.isEmpty()) {
             throw new IllegalStateException("every server of the subscription is excluded");
         }
@@ -217,6 +363,7 @@ public class SingBoxConfigBuilder {
         outbounds.put(directOutbound());
         JSONObject root = skeleton(localPort, true);
         root.put("outbounds", outbounds);
+        addStandby(root, standby);
         return root.toString();
     }
 
@@ -261,12 +408,12 @@ public class SingBoxConfigBuilder {
         // leak, and it works wherever the tunnel does. New (1.12+) typed-server schema.
         JSONObject dnsServer = new JSONObject();
         dnsServer.put("type", "udp");
-        dnsServer.put("tag", "proxy-dns");
+        dnsServer.put("tag", TAG_DNS);
         dnsServer.put("server", "1.1.1.1");
         dnsServer.put("detour", TAG_PROXY);
         JSONObject dns = new JSONObject();
         dns.put("servers", new JSONArray().put(dnsServer));
-        dns.put("final", "proxy-dns");
+        dns.put("final", TAG_DNS);
         dns.put("strategy", "ipv4_only");
 
         JSONObject log = new JSONObject();
@@ -327,6 +474,48 @@ public class SingBoxConfigBuilder {
         }
     }
 
+    /**
+     * Addresses for the given hosts: cached ones at once, the rest looked up in parallel for at
+     * most {@link #STANDBY_RESOLVE_MS}. A lookup that is still running is left to finish on its
+     * own thread and fills the cache for the next start.
+     */
+    private static Map<String, String> resolveQuickly(Set<String> hosts) {
+        HashMap<String, String> out = new HashMap<>();
+        HashMap<String, Future<String>> pending = new HashMap<>();
+        ExecutorService pool = null;
+        for (String host : hosts) {
+            String ip = RESOLVED_HOSTS.get(host);
+            if (ip != null) {
+                out.put(host, ip);
+                continue;
+            }
+            if (pool == null) {
+                pool = Executors.newFixedThreadPool(Math.min(8, hosts.size()), r -> {
+                    Thread t = new Thread(r, "standby-dns");
+                    t.setDaemon(true);
+                    return t;
+                });
+            }
+            pending.put(host, pool.submit(() -> resolveHost(host)));
+        }
+        if (pool == null) {
+            return out;
+        }
+        pool.shutdown();
+        long deadline = System.nanoTime() + STANDBY_RESOLVE_MS * 1_000_000L;
+        for (Map.Entry<String, Future<String>> e : pending.entrySet()) {
+            try {
+                String ip = e.getValue().get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+                if (ip != null && isNumericAddress(ip)) {
+                    out.put(e.getKey(), ip);
+                }
+            } catch (Exception ignored) {
+                // not in time, or failed: the tunnel's DNS takes it
+            }
+        }
+        return out;
+    }
+
     /** Resolve a hostname to an IP via the device resolver, preferring IPv4. IPs pass through. */
     private static String resolveHost(String host) {
         if (TextUtils.isEmpty(host) || isNumericAddress(host)) {
@@ -340,10 +529,12 @@ public class SingBoxConfigBuilder {
                     first = a;
                 }
                 if (a instanceof Inet4Address) {
+                    RESOLVED_HOSTS.put(host, a.getHostAddress());
                     return a.getHostAddress();
                 }
             }
             if (first != null) {
+                RESOLVED_HOSTS.put(host, first.getHostAddress());
                 return first.getHostAddress();
             }
         } catch (Exception ignored) {

@@ -42,7 +42,7 @@ final class SingBoxLogClient implements CommandClientHandler {
                 try {
                     CommandClientOptions options = new CommandClientOptions();
                     options.addCommand(Libbox.CommandLog);
-                    if (session.sub != null) {
+                    if (session.sub != null || session.home != null) {
                         // pushed by the core whenever a server's test result changes, no polling
                         options.addCommand(Libbox.CommandGroup);
                     }
@@ -73,32 +73,36 @@ final class SingBoxLogClient implements CommandClientHandler {
     }
 
     /** Points a selector group at one of its outbounds. Blocking; call off the UI thread. */
-    void selectOutbound(String groupTag, String outboundTag) {
+    boolean selectOutbound(String groupTag, String outboundTag) {
         CommandClient c = client;
         if (c == null) {
             FileLog.e("singbox-core: server not switched, the log client is not connected");
-            return;
+            return false;
         }
         try {
             c.selectOutbound(groupTag, outboundTag);
-            FileLog.d("singbox-core: selector now on " + outboundTag);
+            FileLog.d("singbox-core: selector " + groupTag + " now on " + outboundTag);
+            return true;
         } catch (Throwable e) {
             FileLog.e("singbox-core: switching the server failed: " + e);
+            return false;
         }
     }
 
     /** Asks the core to test every member of the group now. Blocking; call off the UI thread. */
-    void urlTest(String groupTag) {
+    boolean urlTest(String groupTag) {
         CommandClient c = client;
         if (c == null) {
             FileLog.d("singbox-core: server test not requested, the log client is not connected");
-            return;
+            return false;
         }
         try {
             c.urlTest(groupTag);
-            FileLog.d("singbox-core: asked the group to test every server now");
+            FileLog.d("singbox-core: asked the group " + groupTag + " to test every server now");
+            return true;
         } catch (Throwable e) {
             FileLog.e("singbox-core: server test request failed: " + e);
+            return false;
         }
     }
 
@@ -180,7 +184,21 @@ final class SingBoxLogClient implements CommandClientHandler {
             boolean seen = false;
             while (it != null && it.hasNext()) {
                 OutboundGroup group = it.next();
-                if (SingBoxConfigBuilder.TAG_PROXY.equals(group.getTag())) {
+                if (session.home != null && SingBoxConfigBuilder.TAG_STANDBY.equals(group.getTag())) {
+                    // the standby servers of the subscription auto-switch left, tested only on request
+                    VpnSubscription.GroupStatus standby = new VpnSubscription.GroupStatus();
+                    standby.members.addAll(session.homeTagNames.values());
+                    OutboundGroupItemIterator items = group.getItems();
+                    while (items != null && items.hasNext()) {
+                        OutboundGroupItem item = items.next();
+                        String name = session.homeTagNames.get(item.getTag());
+                        if (name != null && item.getURLTestDelay() > 0) {
+                            standby.delays.put(name, item.getURLTestDelay());
+                            standby.times.put(name, item.getURLTestTime());
+                        }
+                    }
+                    VpnController.onStandbyStatus(session, standby);
+                } else if (SingBoxConfigBuilder.TAG_PROXY.equals(group.getTag())) {
                     selectorChoice = group.getSelected(); // "auto" or a server tag
                     seen = true;
                 } else if (SingBoxConfigBuilder.GROUP_AUTO_TAG.equals(group.getTag())) {
