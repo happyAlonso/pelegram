@@ -1185,6 +1185,53 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
         }
     }
 
+    /** pelegram: how long the phone page waits for the code request before it says that Telegram does not answer. */
+    private static final int SEND_CODE_NO_ANSWER_SEC = 25;
+
+    /** pelegram: the code request failed. Shows the error instead of nothing, and logs it. */
+    private void showSendCodeError(TLRPC.TL_error error) {
+        int code = error == null ? 0 : error.code;
+        String text = error == null || TextUtils.isEmpty(error.text) ? getString(R.string.VpnLoginNoDescription) : error.text;
+        FileLog.e("LoginActivity: the code request failed, code " + code + ", " + text);
+        needShowAlert(getString(R.string.RestorePasswordNoEmailTitle), LocaleController.formatString(R.string.VpnLoginRequestError, text, code));
+    }
+
+    /** pelegram: the text for a code request with no answer: connection state, VPN state and the VPN hint. */
+    private String sendCodeNoAnswerText(int seconds) {
+        String connection;
+        switch (getConnectionsManager().getConnectionState()) {
+            case ConnectionsManager.ConnectionStateConnecting:
+                connection = getString(R.string.VpnLoginConnecting);
+                break;
+            case ConnectionsManager.ConnectionStateWaitingForNetwork:
+                connection = getString(R.string.VpnLoginWaitingForNetwork);
+                break;
+            case ConnectionsManager.ConnectionStateConnected:
+                connection = getString(R.string.VpnLoginConnected);
+                break;
+            case ConnectionsManager.ConnectionStateConnectingToProxy:
+                connection = getString(R.string.VpnLoginConnectingToProxy);
+                break;
+            case ConnectionsManager.ConnectionStateUpdating:
+                connection = getString(R.string.VpnLoginUpdating);
+                break;
+            default:
+                connection = String.valueOf(getConnectionsManager().getConnectionState());
+                break;
+        }
+        org.telegram.messenger.vpn.VpnController vpn = org.telegram.messenger.vpn.VpnController.getInstance();
+        String vpnText;
+        if (!vpn.isEnabled()) {
+            vpnText = getString(R.string.VpnLoginVpnOff);
+        } else if (vpn.getState() == org.telegram.messenger.vpn.SingBoxManager.STATE_CONNECTED && vpn.currentVpn.available) {
+            vpnText = LocaleController.formatString(R.string.VpnLoginVpnOn, vpn.currentVpn.getDisplayName());
+        } else {
+            vpnText = LocaleController.formatString(R.string.VpnLoginVpnNotConnected, vpn.currentVpn.getDisplayName());
+        }
+        FileLog.e("LoginActivity: no answer to the code request after " + seconds + " s, connection " + connection + ", VPN " + vpnText);
+        return LocaleController.formatString(R.string.VpnLoginNoAnswer, seconds, connection, vpnText);
+    }
+
     private void needShowAlert(String title, String text) {
         if (text == null || getParentActivity() == null) {
             return;
@@ -1916,6 +1963,9 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
                 }
             } else {
                 FileLog.d("{GOOGLE_PLAY_SERVICES_NOT_AVAILABLE} Resend firebase sms because firebase is not available");
+                // pelegram: resendCodeFromSafetyNet returns at once unless this is set, so a phone without Google
+                // services that got a firebase code type was left with nothing on screen (upstream bug)
+                isRequestingFirebaseSms = true;
                 resendCodeFromSafetyNet(params, res, "GOOGLE_PLAY_SERVICES_NOT_AVAILABLE");
             }
             return;
@@ -1986,6 +2036,12 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
                     params.putString("beginning", res.type.beginning);
                 }
                 setPage(VIEW_CODE_PHRASE, animate, params, false);
+            } else {
+                // pelegram: a code type this version has no page for used to end here with nothing on screen
+                String type = res.type == null ? "null" : res.type.getClass().getSimpleName();
+                FileLog.e("LoginActivity: no page for the login code type " + type);
+                needHideProgress(false);
+                needShowAlert(getString(R.string.RestorePasswordNoEmailTitle), LocaleController.formatString(R.string.VpnLoginUnknownCodeType, type));
             }
         }
     }
@@ -3220,6 +3276,7 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
             phoneInputData.patterns = phoneFormatMap.get(codeField.getText().toString());
             int reqId = ConnectionsManager.getInstance(currentAccount).sendRequest(req, (response, error) -> AndroidUtilities.runOnUIThread(() -> {
                 nextPressed = false;
+                AndroidUtilities.cancelRunOnUIThread(sendCodeWatchdog);
                 if (error == null) {
                     if (response instanceof TLRPC.TL_auth_sentCodeSuccess) {
                         final TLRPC.auth_Authorization auth = ((TLRPC.TL_auth_sentCodeSuccess) response).authorization;
@@ -3274,9 +3331,14 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
                             needShowAlert(getString(R.string.RestorePasswordNoEmailTitle), getString("CodeExpired", R.string.CodeExpired));
                         } else if (error.text.startsWith("FLOOD_WAIT")) {
                             needShowAlert(getString(R.string.RestorePasswordNoEmailTitle), getString("FloodWait", R.string.FloodWait));
-                        } else if (error.code != -1000) {
-                            AlertsCreator.processError(currentAccount, error, LoginActivity.this, req, phoneInputData.phoneNumber);
+                        } else if (AlertsCreator.processError(currentAccount, error, LoginActivity.this, req, phoneInputData.phoneNumber) == null) {
+                            // pelegram: processError has no case for auth.sendCode and returns null without a word for
+                            // most errors, and -1000 was skipped on purpose, so the spinner stopped and nothing was shown
+                            // (issue #1: "nothing happens after i enter my phone number"). Show the error itself.
+                            showSendCodeError(error);
                         }
+                    } else {
+                        showSendCodeError(error);
                     }
                 }
                 if (!isRequestingFirebaseSms) {
@@ -3284,7 +3346,20 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
                 }
             }), ConnectionsManager.RequestFlagDoNotWaitFloodWait | ConnectionsManager.RequestFlagWithoutLogin | ConnectionsManager.RequestFlagTryDifferentDc | ConnectionsManager.RequestFlagEnableUnauthorized);
             needShowProgress(reqId);
+            // pelegram: a code request that gets no answer (Telegram blocked, a dead tunnel, a captcha check that
+            // never returns) has no timeout here and used to leave the spinner running with no word. Say so after
+            // a while, with the connection state and the VPN hint. The request keeps running.
+            AndroidUtilities.cancelRunOnUIThread(sendCodeWatchdog);
+            sendCodeWatchdog = () -> {
+                if (nextPressed && getParentActivity() != null && currentViewNum == VIEW_PHONE_INPUT) {
+                    needShowAlert(getString(R.string.RestorePasswordNoEmailTitle), sendCodeNoAnswerText(SEND_CODE_NO_ANSWER_SEC));
+                }
+            };
+            AndroidUtilities.runOnUIThread(sendCodeWatchdog, SEND_CODE_NO_ANSWER_SEC * 1000L);
         }
+
+        /** See the code request in onNextPressed. */
+        private Runnable sendCodeWatchdog;
 
         private boolean numberFilled;
         public void fillNumber() {

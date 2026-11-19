@@ -4,8 +4,8 @@ pelegram is a fork of the [Telegram App for Android](https://github.com/DrKLO/Te
 an embedded VPN transport, so you can keep Telegram working on networks where deep packet
 inspection (DPI) blocks the standard MTProto and SOCKS5 proxies.
 
-Instead of entering a proxy, you paste a modern VPN key (VLESS, Hysteria2, or AmneziaWG). The app
-runs the tunnel itself and routes Telegram through it. Everything else about the client is stock
+Instead of entering a proxy, you paste a modern VPN key (VLESS, Hysteria2, Shadowsocks or
+AmneziaWG) or a subscription link. The app runs the tunnel itself and routes Telegram through it. Everything else about the client is stock
 Telegram.
 
 ## Why
@@ -22,7 +22,7 @@ need a separate VPN client just to use Telegram.
   - `vless://` - VLESS, including REALITY and XHTTP
   - `hysteria2://` - Hysteria2 (QUIC, with Salamander obfuscation)
   - `ss://` - Shadowsocks / Outline (applies Outline's `prefix` disguise)
-  - AmneziaWG 2.0 - paste the `vpn://...` key exported by the **AmneziaVPN** app (the official Amnezia client), or a raw `awg-quick` `[Interface]` / `[Peer]` config
+  - AmneziaWG 2.0 and 3.x - paste the `vpn://...` key exported by the **AmneziaVPN** app (the official Amnezia client), or a raw `awg-quick` `[Interface]` / `[Peer]` config
 
   Or tap the QR icon on the Add VPN screen to scan a key from a QR code.
 - **App-scoped.** Only Telegram's own traffic goes through the tunnel. There is no system-wide VPN,
@@ -41,8 +41,9 @@ need a separate VPN client just to use Telegram.
 
 ## How to use
 
-1. Open **Settings -> Data and Storage -> Proxy** (the VPN keys live alongside proxies).
-2. Add a key: paste your `vless://` / `hysteria2://` link, or - for AmneziaWG - the `vpn://...` key from the **AmneziaVPN** app.
+1. Open **Settings -> Data and Storage -> VPN**. Before you sign in, the button at the top right of the
+   login screen opens the same list, so the first login can already go through the tunnel.
+2. Add a key: paste your `vless://` / `hysteria2://` / `ss://` link, an `https://` subscription link, or - for AmneziaWG - the `vpn://...` key from the **AmneziaVPN** app.
 3. Enable it. The app starts the tunnel and routes Telegram through it. The row shows connecting,
    then a latency once it is up.
 4. To stop, disable the key. Telegram goes back to a direct connection.
@@ -59,8 +60,8 @@ ss://<base64(method:password)>@<host>:<port>#name
 
 **Shadowsocks / Outline:** paste the `ss://` access key. pelegram applies Outline's `prefix`
 disguise - the Shadowsocks salt is shaped so the first bytes on the wire look like a TLS
-ClientHello - so Outline keys get through DPI that blocks plain Shadowsocks. (The Shadowsocks core
-is patched for this; a standard sing-box build would send a random salt and be blocked.)
+ClientHello - so Outline keys get through DPI that blocks plain Shadowsocks. The Shadowsocks core
+is patched for this. A standard sing-box build would send a random salt and be blocked.
 
 **AmneziaWG** connections are added from the **AmneziaVPN** app - the official Amnezia client
 (https://amnezia.org), not "AmneziaWG", "Amnezia WG" or any other app. In AmneziaVPN, share/export
@@ -69,7 +70,7 @@ the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg
 
 ## Status
 
-- Based on official Telegram **13.1.1** (TL layer 232), kept current with periodic rebases onto upstream.
+- Based on official Telegram **13.2.2** (TL layer 233), kept current with periodic rebases onto upstream.
 - Embedded sing-box core, key parsing, the key management UI, and connect/disconnect wiring are
   integrated and shipping.
 - Calls, the in-app browser, auto-switch between keys, reconnect throttling, background push, and
@@ -93,217 +94,28 @@ the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg
 
 ## Todo / known issues
 
-- **Battery drain compared to the official client.** Three causes, two of them fixed. (a) *Fixed in 1.2.4:* with
-  auto-switch on, the health check re-pinged the current connection every 10s by default, screen off
-  or not. Each check is a `ConnectionsManager.checkProxy`, which suspends and re-dials the proxy
-  connection, so sing-box opened a fresh outbound to the VPN server every time. That pinned the
-  cellular radio in its high-power state (RRC inactivity timers run 10-20s) and, worse, reset tgnet's
-  background sleep timer - a proxy connection coming up sets `lastPauseTime` in
-  `onConnectionConnected`, so the next `select()` pass takes the "resume network and timers" branch
-  and the poll interval drops from ~3min back to 1s. With the sleep timer itself at 10s
-  (`CONNECTION_BACKGROUND_KEEP_TIME`) the app could never stay asleep. Now the user's interval applies
-  only in the foreground, the ladder is 30s/1m/2m/5m defaulting to 2m, and backgrounded the app does
-  not ping on a timer at all - see the auto-switch note below. (b) *Fixed in 1.3.1:* an address the VPN
-  server could not route to cost 2m7s per attempt instead of failing fast. The wireguard endpoint dials
-  inside its own userspace network stack, which reads the deadline from its caller, and no caller set
-  one, so each dial ran until that stack's SYN schedule exhausted. A user log recorded 1487 of them
-  against a single dead Telegram media address in 30 hours, 63 open at once, at least one open for 28%
-  of the whole window - each a stream of encrypted UDP retransmits holding the cellular radio out of
-  its idle state. Two changes. The generated config now sets `connect_timeout` to 10s on the endpoint,
-  and the core is patched to apply it to the dial through the tunnel (`patches/`); 10s sits above a
-  real handshake and below tgnet's own 8-12s socket timeout, so nothing is spent on a connection tgnet
-  has already given up on. tgnet now also counts consecutive failed connects the way it already counted
-  connected-but-silent drops, and backs the re-dial off 1s, 2s, 4s and so on to 30s from the third
-  failure, so a datacenter that comes back is still retried within 30s. (c) *Structural, not fixable:*
-  the fork can't use FCM, so it force-enables tgnet's push
-  connection and runs a foreground service whenever the VPN is on. The official client shares one FCM
-  socket across the whole device and lets the process be frozen.
+- **Higher battery use than the official client, by design.** The fork cannot use FCM, so it keeps
+  tgnet's push connection on and runs a foreground service whenever the VPN is on. The official
+  client shares one FCM socket across the whole device and lets the process be frozen.
 - **The VPN overwrites the user's "Background Connection" setting.** `updateBackgroundKeepAlive()`
-  writes `pushConnection` on every VPN enable/disable/select, so a user who deliberately turns
-  Background Connection off in Notifications settings gets it silently turned back on. The fork does
-  need that connection while the VPN is on (no FCM), but it should not clobber an explicit user
-  choice, and it never restores the previous value when the VPN goes off.
-- **Out of memory on a media-heavy channel over a slow VPN link.** Opening a channel with a lot of
-  photos/videos while the tunnel is running slowly could exhaust the app's heap and restart it:
-  downloads stall and pile up faster than they complete and free their buffers. Mitigated in 1.2.3 by
-  `MemoryGuard`, which caps how many file-load operations run in parallel while the tunnel carries the
-  traffic (and drops to one under pressure), sheds the image caches on Android's `onTrimMemory` /
-  `onLowMemory` signals, and writes an OOM report - heap and native usage, tunnel state, the download
-  queue depth and the stack - into the logs directory so it ships with **Send Logs**. With logging
-  enabled it also writes an `.hprof` heap dump to `files/oom/`. That dump is what closed the case.
-  *Root cause found and fixed in 1.3.2:* a heap dump from a 1.3.1 install 75 hours up (the one behind
-  the "chat opens slowly" complaint) held 63 dead `LaunchActivity` instances, 265 MB of the 417 MB
-  reachable heap, every one pinned through the global `NotificationCenter` by an upstream one-line
-  bug: `ChatBackgroundDrawable.onDetachedFromWindow` inverts its `contains` check, never removes the
-  view, and so never lets its `ImageReceiver` drop its three observers. A second, smaller leak kept
-  dead `ChatMessageCell`s through animated-emoji holders in the static `globalEmojiCache` - released
-  now on detach and on recycle. The inverted check is still present in upstream DrKLO master.
-  `MemoryGuard`'s caps stay: the slow-tunnel pileup they were built for is real regardless, and the
-  freeze-then-restart the leak produced (GC storms once the heap ceiling is near) is exactly what the
-  reporter felt as a chat that would not open.
-- **The tunnel MTU is too large for some links.** *Fixed in 1.3.3.* An earlier log carried 853
-  `sendmsg: message too long` from the AmneziaWG socket, 776 of them inside one hour: `EMSGSIZE`, the
-  encapsulated packet bigger than the path underneath it, dropped before it left the phone. The
-  other direction was measured on the VPN server on 2026-09-03 against a live client whose media had
-  stopped loading. Pinged through the tunnel, packets of 1268 bytes and below arrived, packets of
-  1288, 1300, 1328 and 1420 bytes were lost 10 times out of 10, and packets above the server's own
-  1420-byte tunnel MTU arrived again, because the kernel fragments those into smaller pieces. So
-  that path silently drops any single packet between roughly 1280 and 1420 bytes; two other clients
-  on the same server were clean, which is why the fault followed one user and one network. At the
-  usual tunnel MTU of 1280 every full-size TCP segment is exactly 1280 bytes and lands in that hole,
-  so messages (small packets) keep flowing while a media download receives nothing, times out, and
-  is retried into the same hole. Android's kernel would probe its way below a black hole like this;
-  the userspace TCP stack inside the tunnel does not, which is why a system-wide VPN worked when the
-  app tunnel did not. `SingBoxConfigBuilder` now caps the wireguard/AmneziaWG MTU at 1200 whatever
-  the key asks for (an AmneziaVPN `vpn://` key carries 1280 in `last_config`), which keeps every
-  packet below the measured cliff at a cost of about 6% more packets per megabyte. The server side
-  is the other half: its tunnel interface runs at MTU 1420 with no TCP MSS clamping, so clients of
-  the official Amnezia app on the same network hit the same hole. Lowering that MTU or clamping MSS
-  there is an operator change, not an app change.
-- **Media that never loads while messages keep flowing.** *Fixed in 1.3.3.* A user log from
-  2026-09-02 caught it: a 6.3 MB video from DC2 had its eight chunk requests re-sent until tgnet's
-  `RETRY_LIMIT` (ten reconnects without a byte back) while requests on the generic connection answered
-  in 80 ms and the proxy ping was 92 ms. Switching servers did not help; killing the app did, and so
-  did a system-wide VPN, which users had found on their own. Two things in tgnet turned one unreachable
-  media address into a download that never finished. With any proxy configured, `Connection::connect`
-  marks every dial static, and `Datacenter::getCurrentAddress` then returns the same address each time
-  no matter how the rotation counters move, so an address the VPN server cannot reach is dialed again
-  after every 12 s timeout, only the port changing. That is right for an MTProto proxy, which picks
-  the endpoint itself; through the app tunnel the server dials exactly what it is handed. And after
-  one full pass over a datacenter's list, `Connection::onDisconnectedInternal` widens the strategy from
-  `USE_IPV4_ONLY` to `USE_IPV4_IPV6_RANDOM` by itself; the family it then picks is kept while any
-  connection receives data, and Java re-pushes IPv4-only only on a network or proxy change, which is
-  exactly what reconnecting the VPN does. That is the earlier "connections still go to IPv6
-  datacenters" item (257 dials to `2001:67c:4e8:f002::a` in a 1.1.7 log), now with its line: the pick
-  never consulted `getIpStrategy()`. 1.3.3 tells the core when the app tunnel is the proxy
-  (`ConnectionsManager.setVpnTunnelActive`): the strategy widening is skipped, media connections
-  rotate addresses on failure with one attempt per address instead of four ports each, and the
-  generated sing-box route rejects IPv6 destinations while the tunnel carries only IPv4, so a stray
-  IPv6 dial fails in milliseconds instead of holding a connection for 12 s ten times over. Which
-  address was dead stays unproven: the native tgnet log is off in release builds, and the VPN server's
-  own route to that media address is the other candidate, which the rotation now covers as well.
-- **A download that gives up takes its queue slot with it.** *Fixed in 1.3.3.* When tgnet exhausts
-  its retries on a chunk request it returns `RETRY_LIMIT`, and the file loader restarts the same
-  operation at once, against the same datacenter session that has already swallowed ten requests.
-  Nothing about that session has changed, so the eleventh request is answered by the same silence,
-  and the operation loops. A queue runs only a few operations at a time (fewer while the tunnel is
-  up, see `MemoryGuard`), so two or three of these at the head of a queue stop every other download
-  behind them: a user log caught a chat opening with five photos, all of them parked at queue
-  positions 4 and above, no chunk request sent in seventy seconds. The loop is what makes a
-  transient network fault look permanent, and it is why turning the VPN off and on cures it - that
-  suspends every connection and starts fresh sessions. `RETRY_LIMIT` now does the same thing for the
-  one datacenter that gave up (`ConnectionsManager.resetDownloadSessions`), leaving the generic
-  connection carrying messages untouched.
-- **Auto-switch cannot see a server whose downloads are dead.** *Fixed in 1.3.3.* The health check
-  measures a proxy connection and messages travel on the generic connection, so a server that
-  answers both while dropping every file chunk is healthy by every measure the app had. That is the
-  "media doesn't load but chats work" report exactly, and auto-switch sat it out. Downloads giving
-  up now count towards a switch the way failed pings do: three within five minutes with the tunnel
-  connected rolls over to the next server, and any file that finishes clears the count.
-- **The stories preloader re-runs constantly.** 11104 of 12498 file-load operations in that log were
-  stories, covering 4803 distinct files; one 14.5 MB video was queued 214 times. The repeats are cheap
-  because the file is already cached, so each one finishes in about 3 ms and sends nothing over the
-  network. The trigger is leaving a mini-app or web view, which brings the dialog list back and makes
-  the stories bar preload again. This is upstream behaviour and not a battery problem, but it dominates
-  the log and hides real download activity while reading one.
-- **Auto-switch rotates into servers it already knows are dead.** *Fixed in 1.4.1.* A log from 6
-  and 7 October had
-  seven servers in the list. Three of them never answered once in 23 hours (an unnamed Shadowsocks
-  key and both keys on one host), and `switchToNext` still picked each of them in turn: it takes the
-  next index and ignores the failed ping it recorded seconds earlier. In the background a dead server
-  costs about 22 minutes before the app moves on. It waits two silent ticks, then spends three pings
-  spaced by the outage backoff, and that backoff carries over from the previous server, so it had
-  already reached 300 s. On the night of 7 October the working server died at 06:51 and the app
-  reached the next working one at 07:48, after 46 minutes on two dead entries. The failure count is
-  not consecutive either. It resets only on a successful ping, so a blip at 03:08 still counted at
-  07:02, although the tunnel had carried traffic for the four hours between. Now a server that auto-switch
-  gave up on stays out of the rotation for 30 minutes unless every other server failed too, and a
-  switch to a fresh server starts a trial: three pings 5, 10 and 15 seconds apart, outside the
-  background backoff, after which the app moves on. The first answer ends the trial. A trial runs
-  only while the tunnel worked in the last 30 minutes, so an outage that takes every server down
-  costs one quick lap and then the old slow backoff. Traffic seen by a health-check tick now clears
-  the failure count. A replay of that night against the real `VpnController`, with a simulated clock
-  and the same seven servers, has the app working again 7 minutes after the server died, where the
-  old code took 35. Three separate 150-second blips on a working server over eight hours no longer
-  add up to a switch.
-- **The app feels slow after 100 hours or more of uptime.** Reported on 7 October. The logs sent
-  that day did not cover the slow process: it had run 138 hours, and the 32 MB log budget kept only
-  the last day, which started after the restart. In the 23 hours that were logged, message handling
-  stayed at a median of 5 ms from start to end, and the slow requests all fell in tunnel outages.
-  1.4.1 keeps 96 MB of logs (about three days). A report sent before the app is restarted should
-  show whether the slowdown is the tunnel or the app itself.
-- **Auto-switch ignores network changes.** *Fixed in 1.4.1.* A 1.4.1 test-build log from 10 October:
-  the phone changed networks at
-  20:01, and from then on every server failed, including the two that had worked all day. Three
-  unrelated servers refused connections within 58 ms, faster than any of them answers, so the refusal
-  came from the network path and not from the servers. The app ran its quick lap through all seven
-  servers in five minutes and then fell back to the slow checks, as designed. The fallback then
-  picked the entries that failed longest ago, which on that list were the Shadowsocks key and a finn
-  key that had never answered once. The phone changed networks again at 20:53, 21:01 and 21:06, and
-  none of those changes triggered a new check. The tunnel came back at 21:07, when the user opened
-  the app and picked a server by hand. Now a network change resets the failure count and the
-  backoff and puts the current server on trial within seconds. At most once every 15 minutes it also
-  clears the failure marks of servers that worked before and allows a quick lap. When every server
-  is failing, servers that worked in this session come before keys that never answered. A replay of
-  that evening against the real `VpnController`, swept over 36 possible moments for the block to
-  lift, had the tunnel back after a median of 5 seconds and at worst 57 seconds, where the old code
-  took a median of 5 minutes and at worst 30. The price is paid only while every server is
-  unreachable and the phone keeps changing networks: 97 pings and 18 core restarts an hour, against
-  52 and 13. With a working tunnel a network change costs one ping.
-- **A pasted key that is not alone in the text is rejected.** *Fixed in 1.4.2.* On 29 October a VLESS
-  and a Hysteria2 key for a new server both failed with "Could not read this VPN key", although the
-  parser reads both strings without trouble. The add screen handed the whole field to the parser,
-  which only accepts text that starts with the scheme. A label line, a sentence around the key, or
-  an invisible character picked up by the copy (a zero-width space, a direction mark, a no-break
-  space) was enough to reject it, and two keys pasted together kept the first and folded the
-  second into its name. The rejection was never logged. The add screen now drops invisible
-  characters, finds every key in the text, adds them all and names each from its `#name` part.
-  Text with no key at all, such as a host name copied out of a key through a link, gets its own
-  message. Each paste is logged as length, first and last characters as code points, and the key
-  types found, with nothing secret in it.
-- **AmneziaWG 3.1 keys are rejected.** *Fixed in 1.5.1.* A vpn:// key from a server running
-  AmneziaWG 3.1 failed with "Could not read this VPN key". The key's config gives
-  `PersistentKeepalive` as a range (`25-35`), which the parser fed to `Integer.parseInt`. It also
-  carries eight settings the parser ignored and the tunnel core did not know:
-  `HeaderProtectionKey` (a ChaCha20 mask over the packet headers), `RandomTrailers`,
-  `DisableCookies`, and five timers given as ranges (`RekeyAfterTime`, `RekeyTimeout`,
-  `RejectAfterTime`, `KeepaliveTimeout`, `MaxHandshakeAttempts`). Without the header protection the
-  server cannot read a single packet, so parsing alone would not have helped. 1.5.1 maps every
-  one of them, plus `ContentPaddingAddition`, onto the endpoint, and moves the tunnel core from
-  sing-box-lx 1.14.0-lx.2 to 1.14.4-lx.33, whose WireGuard fork implements AmneziaWG 3.x. The
-  Shadowsocks prefix and the tunnel connect deadline are carried over as patches.
-- **AmneziaWG and Hysteria2 tunnels never connect on 1.5.1.** *Fixed in 1.5.2.* In a log from
-  10 November all three AmneziaWG 3.1 servers failed on the phone from the first second, and
-  Hysteria2 failed almost every time, while VLESS and Shadowsocks worked. The same keys run from a
-  desktop, through the same core and the same generated config, connected at once. On the phone,
-  over adb, `/proc/net/udp` showed that pelegram held no UDP socket at all while an AmneziaWG server
-  was active, and the core logged no send error: the WireGuard device was down. The cause is a
-  change in the 1.14.4 core that 1.5.1 moved to. At start the core now asks the platform once for
-  the default network interface, and when there is none it pauses the network, which takes the
-  WireGuard device down and closes its socket. pelegram runs the core as an app-scoped SOCKS proxy,
-  and its platform interface never reports an interface, so every start ended paused. The 1.14.0
-  core asked only after the platform reported a change, which pelegram never does. A desktop core
-  reads the interface from the operating system and cannot show the bug. Any WireGuard or
-  AmneziaWG key is affected, whatever its version. 1.5.2 patches the core to run that start-up check
-  only after the platform has reported an interface
-  (`patches/sing-box-lx-platform-monitor-pause.patch`). On the same phone the three AmneziaWG
-  servers then answered in 136 to 211 ms, and both Hysteria2 servers in 142 and 171 ms.
-- **Two devices on one AmneziaWG key.** *Detected and shown since 1.5.2.* A WireGuard server keeps
-  one session and one endpoint per key. When two clients use the same key, each handshake takes the
-  session from the other client, and the server sends traffic sealed for one of them to whichever
-  sent last. No client-side change can fix that, so the key has to be used on one device only. This
-  turned up on 10 November while the failures above were being traced. One of the keys, run from a
-  desktop, worked for 16 to 24 seconds after every handshake and then went silent until the next
-  one. An `strace` of the core's UDP socket showed the server still sending, and with the header
-  protection key the headers could be unmasked: from about 21 seconds on every data packet carried a
-  receiver index the client never issued, with a counter climbing from 39 to 969. That is a second
-  client's session on the same key. It was first taken for the cause of the phone failures, which
-  it was not. The core dropped such packets without a log line. 1.5.2 patches it to log an error
-  when they keep arriving while it holds a live session of its own
-  (`patches/wireguard-go-lx-foreign-session.patch`). The app then marks the server "Key in use on
-  another device" for 30 minutes, writes it to the log and, with auto-switch on, moves to the next
-  server. The app reads the core's log stream whether logging is on or not, so the mark does not
-  depend on Enable Logs.
+  writes `pushConnection` on every VPN enable, disable and select, so a user who turns Background
+  Connection off in Notifications settings gets it turned back on. The fork needs that connection
+  while the VPN is on (no FCM), but it should not override an explicit user choice, and it never
+  restores the previous value when the VPN goes off.
+- **The stories preloader re-runs constantly.** 11104 of 12498 file-load operations in one log were
+  stories, covering 4803 distinct files, and one 14.5 MB video was queued 214 times. The repeats are
+  cheap because the file is already cached, so each one finishes in about 3 ms and sends nothing over
+  the network. Leaving a mini-app or web view brings the dialog list back and makes the stories bar
+  preload again. This is upstream behaviour and not a battery problem, but it dominates the log and
+  hides real download activity.
+- **The app feels slow after 100 hours or more of uptime.** Reported on 7 October and not diagnosed:
+  the logs sent that day did not cover the slow process. The app keeps 96 MB of logs (about three
+  days), so a report sent before the app is restarted should show whether the slowdown is the tunnel
+  or the app itself.
+- **One AmneziaWG key on two devices.** A WireGuard server keeps one session per key, so two clients
+  on the same key keep taking the session from each other, and the tunnel goes silent about 20 seconds
+  after each handshake. No client-side change can fix that. pelegram detects it, marks the server
+  "Key in use on another device" for 30 minutes and, with auto-switch on, moves to the next server.
 
 ## Building from source
 
@@ -311,8 +123,9 @@ Requirements: Android SDK (compile SDK 36), NDK `27.2.12479018`, JDK 17, and Go 
 tunnel core). See `VPN_FEATURE_PLAN.md` for the full design and integration notes.
 
 1. **Fetch the submodules.** Upstream keeps ffmpeg, dav1d, libvpx, libyuv, openh264, ogg/opus/opusfile,
-   boringssl, abseil, tdlib, wamr, tlottie, jlatexmath, boost-regex, libprisma, wallet-engine and the
-   androidx media3 player module (`TMessagesProj_Modules/media`) as git submodules:
+   boringssl, abseil, tdlib, wamr, tlottie, jlatexmath, boost-regex, libprisma, wallet-engine, twidget,
+   widget-sandbox and the androidx media3 player module (`TMessagesProj_Modules/media`) as git
+   submodules. widget-sandbox has a nested QuickJS submodule, so the fetch must be recursive:
    ```
    git submodule update --init --recursive --depth=1
    ```
