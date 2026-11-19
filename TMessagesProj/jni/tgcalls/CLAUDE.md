@@ -196,9 +196,11 @@ For group-churn: success = all churn cycles complete without crash/hang AND base
 - `--custom-params JSON` — sets the caller's engine `customParameters` as a JSON object (merged
   with the `wasm_core_path` entry the CLI synthesises from `--wasm-core`). This is how to
   exercise the default-off flags without a server-side rollout: e.g.
-  `network_disable_stun_when_unconfigured`, `network_reflector_resolve_remote_candidate_ip`,
-  `network_reference_immediate_capture_renegotiation` (and `network_reference_use_addtrack`,
-  default ON since 2026-10-12, as `false` to compare against the old two-round shape).
+  `network_disable_stun_when_unconfigured`,
+  `network_reference_immediate_capture_renegotiation` (and the default-ON ones as `false` to
+  compare against the old behaviour: `network_reference_use_addtrack`, ON since 2026-10-12, the old
+  two-round shape; `network_reflector_resolve_remote_candidate_ip`, ON since 2026-10-27, the
+  reflector keying defect).
 - `--custom-params2 JSON` — same for the callee. Independent of `--custom-params` — unlike
   `--wasm-core2` there is no fallback to the caller's value — so `--custom-params2` **alone**
   gives the callee different engine parameters than the caller, enabling a within-call A/B on
@@ -365,13 +367,22 @@ state at all, forever).
 
 | flag | reaches | effect |
 |---|---|---|
-| `network_reflector_resolve_remote_candidate_ip` | `NativeNetworkingImpl` → `InstanceV2Impl` → versions 7/8/9/12/13; also 11/14/18/19 | default off; signalled relay connections can receive binding responses |
+| `network_reflector_resolve_remote_candidate_ip` | `NativeNetworkingImpl` → `InstanceV2Impl` → versions 7/8/9/12/13; also 11/14/18/19 | **default ON since 2026-10-27** (`getCustomParameterBoolDefaultTrue`; the server's explicit `false` turns it off); signalled relay connections can receive binding responses. The legacy `InstanceImpl` (2.7.7, 5.0.0) hardcodes it off |
 | `network_disable_stun_when_unconfigured` | 11/14/18/19 | default off; stops sending unparseable STUN to reflectors |
 | `network_reference_use_addtrack` | 11.0.0 | **default ON since 2026-10-12** (see "One-round negotiation" below); `false` restores the two-round shape |
 
 Exercise them with the CLI's `--custom-params '<json>'` (caller) / `--custom-params2` (callee).
 
-**Before enabling `network_reflector_resolve_remote_candidate_ip`** — the connection key collapses
+**`network_reflector_resolve_remote_candidate_ip` is on by default since 2026-10-27.** Checked
+against a local stand-in reflector (this network blocks UDP to Telegram's), 4–8 CLI calls per arm
+on 11, 13, 14, 18 and 19: with the flag off, signalled reflector connections got 0 binding
+responses (92 and 120 pings on 11 and 13) and every call came up on a prflx twin; with it on (now
+also with no key at all), every signalled connection got its response and was selected first. An
+explicit `false` restores the old behaviour, and a mixed call (one side on) connects as before.
+The collapse below was not exercised (one reflector port per side) and is the thing to watch in
+the field.
+
+**The side effect** — the connection key collapses
 per *candidate*, not per *peer*, and one peer publishes several: `OngoingCallContext.swift` emits
 the v4 and v6 entries of one reflector with the **same `reflectorId` and port**, and there is one
 relay port per network with a fresh random tag. `SocketAddress::operator<` stops comparing
@@ -520,12 +531,23 @@ log sample (`getlogstgcalls/analysis/FINDINGS-android.md`), fixed here and pinne
   it protects a build that carries it from its own mid-flight re-offer, and does nothing for a
   peer that re-offers against it (an unfixed Android caller still ends up client-vs-client with
   a fixed callee). On iOS it is dormant, since `requestRenegotiation()` never replaces an
-  in-flight offer; it matters for the Android port. `network_reference_immediate_capture_renegotiation`
+  in-flight offer; it matters for the Android port. WebRTC's own `OnRenegotiationNeeded` goes
+  through `requestRenegotiation()` too (since 2026-10-22, as Android's `03d7b86` does), so no
+  path offers outside a quiet stable state. That change measured neutral in the CLI: the
+  PeerConnection's signaling thread is the media thread, so a stale event could never replace
+  an in-flight offer; it only merges a possible redundant offer round. `network_reference_immediate_capture_renegotiation`
   (CLI-only: read under `TGCALLS_ALLOW_TEST_KNOBS`, defined for `tgcalls_core` and never for the
   objc_library) restores the pre-2026-09-17 immediate offer so the CLI can reproduce the chain
   (`android-late-cam`, `android-glare` in the test script: 500 ms fixed signaling delay, caller
   camera at 2.6 s, callee camera at 2.8 s — the SCTP handshake puts the first offer at the callee
-  at ~2.5 s). A camera `AddTrack` may also reuse the recvonly transceiver carrying the peer's
+  at ~2.5 s). **`android-late-cam` fails about one run in five on its own** (14 of 72 parallel
+  runs, 2026-10-22, before and after the change above alike), so one red run there is not a
+  regression. When the SCTP handshake hands the callee the first offer and its replacement
+  together, the callee is still applying the first, ignores the replacement as glare and
+  answers the first; the caller rejects that answer and the call never connects. It is the
+  production shape of an old Android caller (13.0.0 and earlier re-offer at once) against any
+  13.x callee, and nothing fixes it yet: the callee would have to queue an offer that arrives
+  while it answers instead of ignoring it, since it has no offer of its own. A camera `AddTrack` may also reuse the recvonly transceiver carrying the peer's
   video; `SetCodecPreferences` is then skipped (the transceiver has a `mid()`), since the
   sender-only list must not narrow an m-line the peer already negotiated.
 
