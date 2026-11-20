@@ -11,6 +11,7 @@ import android.os.IBinder;
 import androidx.core.app.NotificationCompat;
 import androidx.core.app.NotificationManagerCompat;
 
+import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.ApplicationLoader;
 import org.telegram.messenger.FileLog;
 import org.telegram.messenger.LocaleController;
@@ -71,6 +72,17 @@ public class VpnForegroundService extends Service {
             // leave a zombie started service around.
             stopSelf();
         }
+        // A sticky restart brings up a new process with nothing loaded: tgnet starts blocked while the
+        // VPN is on (TgnetRouting), so bring the core back, as AppStartReceiver does after a reboot.
+        // load() is a no-op when the app already loaded it.
+        AndroidUtilities.runOnUIThread(() -> {
+            try {
+                ApplicationLoader.postInitApplication();
+                VpnController.getInstance().load();
+            } catch (Throwable e) {
+                FileLog.e(e);
+            }
+        });
         return START_STICKY;
     }
 

@@ -585,7 +585,7 @@ public class TranslateAlert2 extends BottomSheet implements NotificationCenter.N
                     uri += "/singl";
                     uri += "e?client=gtx&sl=" + Uri.encode(fromLng) + "&tl=" + Uri.encode(toLng) + "&dt=t" + "&ie=UTF-8&oe=UTF-8&otf=1&ssel=0&tsel=0&kc=7&dt=at&dt=bd&dt=ex&dt=ld&dt=md&dt=qca&dt=rw&dt=rm&dt=ss&q=";
                     uri += text;
-                    connection = (HttpURLConnection) new URI(uri).toURL().openConnection();
+                    connection = (HttpURLConnection) org.telegram.messenger.vpn.WebViewProxyController.openConnection(new URI(uri).toURL());
                     connection.setRequestMethod("GET");
                     connection.setRequestProperty("User-Agent", userAgents[(int) Math.round(Math.random() * (userAgents.length - 1))]);
                     connection.setRequestProperty("Content-Type", "application/json");

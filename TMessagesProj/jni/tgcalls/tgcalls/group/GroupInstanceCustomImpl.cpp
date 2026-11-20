@@ -1364,6 +1364,10 @@ public:
     _onMutedSpeechActivityDetected(std::move(descriptor.onMutedSpeechActivityDetected)) {
         assert(_threads->getMediaThread()->IsCurrent());
 
+        // pelegram: the VPN's SOCKS5 proxy for the group call's UDP media (port 0 = direct)
+        _proxyHost = descriptor.proxyHost;
+        _proxyPort = descriptor.proxyPort;
+
         _threads->getWorkerThread()->BlockingCall([this] {
             _workerThreadSafery = webrtc::PendingTaskSafetyFlag::Create();
         });
@@ -1429,7 +1433,7 @@ public:
 
         bool takeAudioLevelFromNetwork = _e2eEncryptDecrypt == nullptr;
 
-        _networkManager.reset(new ThreadLocalObject<GroupNetworkManager>(_threads->getNetworkThread(), [weak, threads = _threads, takeAudioLevelFromNetwork] () mutable {
+        _networkManager.reset(new ThreadLocalObject<GroupNetworkManager>(_threads->getNetworkThread(), [weak, threads = _threads, takeAudioLevelFromNetwork, proxyHost = _proxyHost, proxyPort = _proxyPort] () mutable {
             return std::make_shared<GroupNetworkManager>(
                 fieldTrialsBasedConfig,
                 [=](const GroupNetworkManager::State &state) {
@@ -1479,7 +1483,7 @@ public:
                             strong->updateSsrcActivity(ssrc);
                         }
                     });
-                }, threads);
+                }, threads, proxyHost, proxyPort);
         }));
 
     #if USE_RNNOISE
@@ -3686,6 +3690,8 @@ private:
     VideoContentType _videoContentType{VideoContentType::None};
     std::vector<VideoCodecName> _videoCodecPreferences;
     std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, int64_t, bool, int32_t)> _e2eEncryptDecrypt;
+    std::string _proxyHost;
+    uint16_t _proxyPort = 0;
 
     int _nextMediaChannelDescriptionsRequestId = 0;
     std::map<int, RequestedMediaChannelDescriptions> _requestedMediaChannelDescriptions;

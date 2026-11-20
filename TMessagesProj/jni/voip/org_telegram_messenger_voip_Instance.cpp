@@ -489,7 +489,7 @@ void initWebRTC(JNIEnv *env) {
 }
 
 extern "C"
-JNIEXPORT jlong JNICALL Java_org_telegram_messenger_voip_NativeInstance_makeGroupNativeInstance(JNIEnv *env, jclass clazz, jobject instanceObj, jstring logFilePath, jboolean highQuality, jlong videoCapturer, jboolean screencast, jboolean noiseSupression, jboolean conference) {
+JNIEXPORT jlong JNICALL Java_org_telegram_messenger_voip_NativeInstance_makeGroupNativeInstance(JNIEnv *env, jclass clazz, jobject instanceObj, jstring logFilePath, jboolean highQuality, jlong videoCapturer, jboolean screencast, jboolean noiseSupression, jboolean conference, jstring proxyHost, jint proxyPort) {
     initWebRTC(env);
 
     std::shared_ptr<VideoCaptureInterface> videoCapture;
@@ -627,6 +627,12 @@ JNIEXPORT jlong JNICALL Java_org_telegram_messenger_voip_NativeInstance_makeGrou
             });
             return task;
         };
+    }
+
+    // pelegram: while the VPN is on the group call's UDP media goes through its local SOCKS5 proxy
+    if (proxyHost != nullptr && proxyPort > 0) {
+        descriptor.proxyHost = tgvoip::jni::JavaStringToStdString(env, proxyHost);
+        descriptor.proxyPort = (uint16_t) proxyPort;
     }
 
     auto *holder = new InstanceHolder;

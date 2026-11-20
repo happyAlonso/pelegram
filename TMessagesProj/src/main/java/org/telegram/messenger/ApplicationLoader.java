@@ -194,6 +194,18 @@ public class ApplicationLoader extends Application {
         }
         applicationInited = true;
         NativeLoader.initNativeLibs(ApplicationLoader.applicationContext);
+        // pelegram: whatever started this process (a notification reply, a widget, a share), with the VPN
+        // on tgnet starts blocked (TgnetRouting), so the core must come up here too, not only when the
+        // main screen opens. load() is a no-op when it already ran
+        if (org.telegram.messenger.vpn.TgnetRouting.holdsProxy()) {
+            AndroidUtilities.runOnUIThread(() -> {
+                try {
+                    org.telegram.messenger.vpn.VpnController.getInstance().load();
+                } catch (Throwable e) {
+                    FileLog.e(e);
+                }
+            });
+        }
 
         try {
             LocaleController.getInstance(); //TODO improve
@@ -305,6 +317,8 @@ public class ApplicationLoader extends Application {
         if (org.telegram.utils.twidget.WidgetEngineService.isEngineProcess()) {
             return;
         }
+        // pelegram: library HTTP goes through the VPN while it is on (second layer, see the method)
+        org.telegram.messenger.vpn.WebViewProxyController.installProxySelector();
 
         // AndroidUtilities must be initialized before FileLog
         final String helloWorld = AndroidUtilities.getHelloWorld();

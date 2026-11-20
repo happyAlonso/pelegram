@@ -4024,6 +4024,9 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
             super(context);
             this.bot = bot;
             d("created new webview " + this);
+            // pelegram: while the VPN is on, pages and mini apps get no WebRTC. Its UDP (STUN, ICE) ignores
+            // the WebView proxy override and would go out with the real address
+            org.telegram.messenger.vpn.WebViewProxyController.harden(this);
 
             setOnLongClickListener(new View.OnLongClickListener() {
                 @Override
@@ -4732,6 +4735,8 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
                         }
                     } else {
                         WebView newWebView = new WebView(view.getContext());
+                        // pelegram: no WebRTC while the VPN is on, its UDP ignores the proxy
+                        org.telegram.messenger.vpn.WebViewProxyController.harden(newWebView);
                         newWebView.setWebViewClient(new WebViewClient() {
                             @Override
                             public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {

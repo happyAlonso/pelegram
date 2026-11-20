@@ -18,6 +18,7 @@
 #include "TurnCustomizerImpl.h"
 #include "SctpDataChannelProviderInterfaceImpl.h"
 #include "StaticThreads.h"
+#include "v2/Socks5PacketSocketFactory.h"
 #include "call/rtp_packet_sink_interface.h"
 #include "modules/rtp_rtcp/source/rtp_packet_received.h"
 #include "modules/rtp_rtcp/source/rtp_header_extensions.h"
@@ -335,7 +336,9 @@ GroupNetworkManager::GroupNetworkManager(
     std::function<void(uint32_t, uint8_t, bool)> audioActivityUpdated,
     bool zeroAudioLevel,
     std::function<void(uint32_t)> anyActivityUpdated,
-    std::shared_ptr<Threads> threads) :
+    std::shared_ptr<Threads> threads,
+    std::string proxyHost,
+    uint16_t proxyPort) :
 _threads(std::move(threads)),
 _stateUpdated(std::move(stateUpdated)),
 _unknownSsrcPacketReceived(std::move(unknownSsrcPacketReceived)),
@@ -343,7 +346,9 @@ _dataChannelStateUpdated(dataChannelStateUpdated),
 _dataChannelMessageReceived(dataChannelMessageReceived),
 _audioActivityUpdated(audioActivityUpdated),
 _zeroAudioLevel(zeroAudioLevel),
-_anyActivityUpdated(anyActivityUpdated) {
+_anyActivityUpdated(anyActivityUpdated),
+_proxyHost(std::move(proxyHost)),
+_proxyPort(proxyPort) {
     assert(_threads->getNetworkThread()->IsCurrent());
 
     _localIceParameters = PeerIceParameters(rtc::CreateRandomString(cricket::ICE_UFRAG_LENGTH), rtc::CreateRandomString(cricket::ICE_PWD_LENGTH), false);
@@ -353,6 +358,12 @@ _anyActivityUpdated(anyActivityUpdated) {
     _networkMonitorFactory = PlatformInterface::SharedInstance()->createNetworkMonitorFactory();
 
     _socketFactory.reset(new rtc::BasicPacketSocketFactory(_threads->getNetworkThread()->socketserver()));
+    // pelegram: while the VPN is on, the group call's UDP media goes through the local SOCKS5 proxy
+    // (UDP ASSOCIATE), exactly as a 1:1 call does in NativeNetworkingImpl
+    if (_proxyPort != 0) {
+        RTC_LOG(LS_INFO) << "GroupNetworkManager: media through the SOCKS5 proxy on port " << _proxyPort;
+        _socketFactory = std::make_unique<Socks5PacketSocketFactory>(std::move(_socketFactory), _threads->getNetworkThread()->socketserver(), rtc::SocketAddress(_proxyHost, _proxyPort));
+    }
     _networkManager = std::make_unique<rtc::BasicNetworkManager>(_networkMonitorFactory.get(), _threads->getNetworkThread()->socketserver());
     _asyncResolverFactory = std::make_unique<webrtc::BasicAsyncDnsResolverFactory>();
 
@@ -392,6 +403,11 @@ void GroupNetworkManager::resetDtlsSrtpTransport() {
         cricket::PORTALLOCATOR_ENABLE_IPV6 |
         cricket::PORTALLOCATOR_ENABLE_IPV6_ON_WIFI;
     
+    // pelegram: a proxied call tunnels only its UDP sockets; TCP candidates would connect direct,
+    // and there is nothing to learn from STUN behind the tunnel
+    if (_proxyPort != 0) {
+        flags |= cricket::PORTALLOCATOR_DISABLE_TCP | cricket::PORTALLOCATOR_DISABLE_STUN;
+    }
     portAllocator->set_flags(flags);
     portAllocator->Initialize();
 

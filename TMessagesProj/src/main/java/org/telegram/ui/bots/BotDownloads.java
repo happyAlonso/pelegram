@@ -161,10 +161,12 @@ public class BotDownloads {
     public void cancel(FileDownload file) {
         if (file == null) return;
         file.cancelled = true;
-        if (file.id != null) {
+        if (file.tunnelJob != null) {
+            file.tunnelJob.cancel();
+        } else if (file.id != null) {
             downloadManager.remove(file.id);
-            file.id = null;
         }
+        file.id = null;
         files.remove(file);
         postNotify();
     }
@@ -198,6 +200,8 @@ public class BotDownloads {
         public boolean cancelled;
 
         public long last_progress_time;
+        // pelegram: set while the VPN is on, instead of a DownloadManager id
+        public org.telegram.messenger.vpn.TunnelDownload.Job tunnelJob;
 
         public boolean resaved;
         public boolean shown;
@@ -207,6 +211,30 @@ public class BotDownloads {
             this.file_name = file_name;
 
             final TLRPC.User bot = MessagesController.getInstance(currentAccount).getUser(botId);
+
+            // pelegram: DownloadManager runs in another process and would fetch the file direct, so
+            // while the VPN is on the file comes through the tunnel in this process
+            if (org.telegram.messenger.vpn.TunnelDownload.needed()) {
+                id = -1L;
+                tunnelJob = org.telegram.messenger.vpn.TunnelDownload.start(LaunchActivity.instance != null ? LaunchActivity.instance : context,
+                        url, null, null, file_name, (savedFile, error) -> {
+                    if (cancelled) {
+                        return;
+                    }
+                    if (error != null) {
+                        FileLog.e("BotDownloads: " + error);
+                        cancel();
+                        return;
+                    }
+                    file = savedFile;
+                    done = true;
+                    size = savedFile != null ? savedFile.length() : tunnelJob.loaded;
+                    loaded_size = size;
+                    save();
+                    postNotify();
+                });
+                return;
+            }
 
             final DownloadManager.Request request = new DownloadManager.Request(Uri.parse(url));
             request.setTitle(UserObject.getUserName(bot));
@@ -249,6 +277,13 @@ public class BotDownloads {
                 return;
             AndroidUtilities.cancelRunOnUIThread(updateProgressRunnable);
             last_progress_time = System.currentTimeMillis();
+            if (tunnelJob != null) {
+                loaded_size = tunnelJob.loaded;
+                size = tunnelJob.total;
+                AndroidUtilities.runOnUIThread(updateProgressRunnable, 160L);
+                postNotify();
+                return;
+            }
             final DownloadManager.Query query = new DownloadManager.Query();
             query.setFilterById(id);
             Cursor cursor = null;

@@ -30,12 +30,17 @@ need a separate VPN client just to use Telegram.
   app points Telegram's existing proxy layer at it.
 - **Connection status, like proxies.** A VPN key shows whether it is working and its latency, the
   same way the proxy list does.
-- **Calls and the in-app browser go through the tunnel too.** 1:1 calls (both directions, including
-  with stock Telegram users) and the in-app browser / web views route through the VPN, with DNS
-  resolved on the far side of the tunnel. The browser's own requests (address bar suggestions,
-  popups, favicons, embedded players) and its downloads use the tunnel as well. While the VPN is on,
-  web links always open in the in-app browser. If the tunnel is not connected yet, or is reconnecting
-  after a server switch, pages fail to load instead of going out with the real address.
+- **Everything goes through the tunnel while the VPN is on.** Messages, media, push, 1:1 calls
+  (both directions, including with stock Telegram users), group calls and video chats, the in-app
+  browser and every web view, mini apps and their downloads, and the app's own web requests
+  (translation, web images, the update check) all route through the VPN, with DNS resolved on the
+  far side of the tunnel. While the VPN is on, web links always open in the in-app browser. If the
+  tunnel is not connected yet, or is reconnecting after a server switch, nothing goes out until it is
+  back: Telegram waits, pages and downloads fail, a call fails to connect. Nothing uses the real
+  address while the VPN is on. Turning the VPN off makes everything direct again. Your own
+  Telegram proxy settings stay saved and apply again when the VPN is off. While it is on, the
+  proxy list shows those proxies as unavailable, because checking them would connect to them
+  directly.
 - **Subscription links.** An `https://` subscription link becomes one row in the VPN list. Its servers
   run as one group that sends new connections through the fastest one, and the list updates every
   hour. When auto-switch has moved to another key, the app checks the subscription through that key
@@ -115,14 +120,24 @@ the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg
   the logs sent that day did not cover the slow process. The app keeps 96 MB of logs (about three
   days), so a report sent before the app is restarted should show whether the slowdown is the tunnel
   or the app itself.
-- **Some requests outside the in-app browser still go direct while the VPN is on.** They are message
-  translation (translate.googleapis.com), images and music artwork that the app loads from web
-  addresses, card tokenization in the payment form, Telegram's DNS-over-HTTPS lookup of server
-  addresses, and video that the app's own player streams from a web address (embedded videos in
-  Instant View: media3's `DefaultHttpDataSource` opens its connection without a proxy). They go out
-  with the real address. Links tapped in a chat bubble open in the external browser, because
-  upstream never uses the in-app browser there. Links that you open with "Open in system browser",
-  and links that another installed app handles, leave pelegram and the tunnel on purpose.
+- **What still leaves outside the tunnel while the VPN is on.** pelegram is an app-scoped proxy,
+  not a system VPN, so only traffic that pelegram itself sends can be routed:
+  - Google Play services run in their own process: the Google Maps tiles, location, Firebase and the
+    Play Integrity / reCAPTCHA checks on login.
+  - Links opened with "Open in system browser", links that another installed app handles, and links
+    tapped in a chat bubble (upstream never uses the in-app browser there) open in another app.
+  - WebRTC in web pages sends UDP that ignores the web view proxy, so it is switched off in every
+    web view created while the VPN is on. A web view that was opened before the VPN went on keeps
+    it until it is opened again, and a system WebView too old for document-start scripts keeps it.
+  - Library code that opens its own HTTP connection (the Stripe SDK in the payment form) gets the
+    tunnel through a process `ProxySelector`, but Android's HttpURLConnection tries one direct
+    connection after a failed proxy, so while the tunnel is down such a request can go direct.
+  - A subscription link is downloaded direct when no working tunnel exists, because that is the
+    only way to fetch new servers. Everything else waits for the tunnel.
+- **Calls while the VPN is on use tgcalls versions 7.0.0 to 13.0.0 only.** Those are the engine
+  that relays call media through the SOCKS5 proxy. The newer engines (14, 18, 19) and the old ones
+  (2.7.7, 5.0.0) would send media direct. A peer that offers none of 7 to 13 cannot be called with
+  the VPN on. Group calls through the tunnel are new in 1.6.0 and need testing in real calls.
 - **One AmneziaWG key on two devices.** A WireGuard server keeps one session per key, so two clients
   on the same key keep taking the session from each other, and the tunnel goes silent about 20 seconds
   after each handshake. No client-side change can fix that. pelegram detects it, marks the server

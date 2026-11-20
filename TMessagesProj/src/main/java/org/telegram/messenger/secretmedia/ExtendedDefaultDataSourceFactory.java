@@ -40,7 +40,7 @@ public final class ExtendedDefaultDataSourceFactory implements DataSource.Factor
      */
     public ExtendedDefaultDataSourceFactory(Context context, String userAgent,
                                     TransferListener listener) {
-        this(context, listener, new DefaultHttpDataSource.Factory()
+        this(context, listener, new androidx.media3.datasource.TunnelHttpDataSource.Factory()
                 .setUserAgent(userAgent)
                 .setTransferListener(listener)
                 .setAllowCrossProtocolRedirects(true));

@@ -440,7 +440,7 @@ public class VpnController implements SingBoxManager.StateListener {
                 && SingBoxManager.getInstance().getState() == SingBoxManager.STATE_IDLE) {
             reconnect();
         }
-        updateBrowserRouting(); // before the first WebView: blocked until the core is up
+        updateRouting(); // before the first WebView: blocked until the core is up
         updateBackgroundKeepAlive();
         scheduleSubscriptionCheck(SUBSCRIPTION_FIRST_CHECK_MS);
         scheduleProbe(PROBE_DELAYS_MS[0]);
@@ -521,14 +521,54 @@ public class VpnController implements SingBoxManager.StateListener {
     }
 
     /**
-     * Whether an active call's media should be sent through the embedded proxy right now. Requires the
-     * VPN to be on, the user to have opted in, and the core to be actually connected with a live SOCKS
-     * port - otherwise the call must go direct.
+     * tgcalls versions whose engine (InstanceV2Impl) relays call media through the SOCKS5 proxy
+     * (Socks5UdpSocket). The others ignore the proxy and would send media direct: 2.7.7 and 5.0.0
+     * (InstanceImpl, TCP only), 10/11/14 (InstanceV2ReferenceImpl / CompatImpl), 18/19 (Pump).
+     */
+    public static final List<String> TUNNEL_CALL_VERSIONS = java.util.Arrays.asList("13.0.0", "12.0.0", "9.0.0", "8.0.0", "7.0.0");
+
+    /**
+     * Whether call media (1:1 and group) goes through the embedded proxy: whenever the VPN is on. While
+     * the core is not connected the call gets the dead port (see {@link #callProxyPort()}), so it
+     * fails instead of going direct. The old "route calls" switch is gone: the VPN carries everything.
      */
     public boolean shouldRouteCalls() {
-        return isEnabled() && routeCalls
-                && SingBoxManager.getInstance().getState() == SingBoxManager.STATE_CONNECTED
-                && SingBoxManager.getInstance().getLocalPort() > 0;
+        return isEnabled();
+    }
+
+    /** Host of the proxy a call must use, null when the VPN is off (direct). */
+    public String callProxyHost() {
+        return isEnabled() ? "127.0.0.1" : null;
+    }
+
+    /**
+     * Port of the proxy a call must use: the core's while it is connected, a dead local port while
+     * the VPN is on but not connected, 0 when the VPN is off.
+     */
+    public int callProxyPort() {
+        if (!isEnabled()) {
+            return 0;
+        }
+        SingBoxManager m = SingBoxManager.getInstance();
+        int port = m.getLocalPort();
+        return m.getState() == SingBoxManager.STATE_CONNECTED && port > 0 ? port : WebViewProxyController.BLOCK_PORT;
+    }
+
+    /**
+     * The tgcalls versions to offer for a 1:1 call: all of them with the VPN off, only those of the
+     * proxied engine while it is on, so the peers never agree on an engine that sends media direct.
+     */
+    public String[] callVersions(String[] all) {
+        if (!isEnabled()) {
+            return all;
+        }
+        ArrayList<String> out = new ArrayList<>();
+        for (String v : all) {
+            if (TUNNEL_CALL_VERSIONS.contains(v)) {
+                out.add(v);
+            }
+        }
+        return out.toArray(new String[0]);
     }
 
     /** Local SOCKS5 port the sing-box core is listening on (0 if not connected). */
@@ -540,7 +580,7 @@ public class VpnController implements SingBoxManager.StateListener {
      * Whether web links must stay in the in-app browser: whenever the VPN is on, connected or not.
      * {@link org.telegram.messenger.browser.Browser} uses it to skip Custom Tabs and the external
      * browser, which run in another process and can't be tunnelled. While the tunnel is not up the
-     * in-app browser is blocked (see {@link #updateBrowserRouting()}), so a link fails instead of
+     * in-app browser is blocked (see {@link #updateRouting()}), so a link fails instead of
      * opening with the real address.
      */
     public boolean shouldRouteBrowser() {
@@ -548,22 +588,26 @@ public class VpnController implements SingBoxManager.StateListener {
     }
 
     /**
-     * Points the in-app browser (every in-process WebView and the browser's own Java requests) at the
-     * core while it is connected, at a dead local port while the VPN is on but the core is not
-     * connected (start, restart, error), and direct only when the VPN is off. Fail closed: a page
-     * never goes out with the real address while the VPN is on.
+     * Points everything the app sends (tgnet, every in-process WebView, the app's own Java requests;
+     * calls read {@link #callProxyPort()} when they start) at the core while it is connected, at a
+     * dead local port while the VPN is on but the core is not connected (start, restart, error), and
+     * direct only when the VPN is off. Fail closed: nothing goes out with the real address while the
+     * VPN is on.
      */
-    void updateBrowserRouting() {
+    void updateRouting() {
         if (!isEnabled()) {
             WebViewProxyController.clear();
+            TgnetRouting.clear();
             return;
         }
         SingBoxManager m = SingBoxManager.getInstance();
         int port = m.getLocalPort();
         if (m.getState() == SingBoxManager.STATE_CONNECTED && port > 0) {
             WebViewProxyController.apply(port);
+            TgnetRouting.apply(port);
         } else {
             WebViewProxyController.block();
+            TgnetRouting.block();
         }
     }
 
@@ -691,7 +735,7 @@ public class VpnController implements SingBoxManager.StateListener {
     private void stopCore() {
         pingToken++;
         SingBoxManager.getInstance().disconnect();
-        updateBrowserRouting(); // a core that was already down sends no state event
+        updateRouting(); // a core that was already down sends no state event
     }
 
     private void reconnect() {
@@ -757,7 +801,7 @@ public class VpnController implements SingBoxManager.StateListener {
         }
         // at once: a first key added while the VPN is on must not leave the browser direct until the
         // core's CONNECTING event reaches this thread
-        updateBrowserRouting();
+        updateRouting();
     }
 
     /**
@@ -821,11 +865,11 @@ public class VpnController implements SingBoxManager.StateListener {
                 // (not just at connect) triggers auto-switch.
                 scheduleHealthCheck();
                 // Route all in-process WebViews (the in-app browser included) through the proxy too.
-                updateBrowserRouting();
+                updateRouting();
             } else {
                 AndroidUtilities.cancelRunOnUIThread(healthCheckRunnable);
                 stopTrial();
-                updateBrowserRouting(); // blocked while the VPN is on, direct only when it is off
+                updateRouting(); // blocked while the VPN is on, direct only when it is off
                 AndroidUtilities.cancelRunOnUIThread(groupFirstRoundRunnable);
                 for (VpnSubscription s : subscriptions) {
                     s.groupStatus = null; // the next core starts its tests from scratch

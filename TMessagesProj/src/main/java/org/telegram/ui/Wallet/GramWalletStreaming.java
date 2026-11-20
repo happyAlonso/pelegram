@@ -159,7 +159,15 @@ public class GramWalletStreaming {
         log("opening websocket; attempt=" + attempt);
         try {
             // Preserve the server-issued URL, including its authentication parameters.
-            socket = new WebSocketFactory().setConnectionTimeout(10_000).createSocket(url);
+            final WebSocketFactory wsFactory = new WebSocketFactory().setConnectionTimeout(10_000);
+            // pelegram: through the VPN while it is on (HTTP CONNECT on the core's mixed inbound, or
+            // the dead port while it is not connected), never direct
+            final java.net.Proxy vpnProxy = org.telegram.messenger.vpn.WebViewProxyController.javaProxy();
+            if (vpnProxy.type() == java.net.Proxy.Type.HTTP && vpnProxy.address() instanceof java.net.InetSocketAddress) {
+                final java.net.InetSocketAddress a = (java.net.InetSocketAddress) vpnProxy.address();
+                wsFactory.getProxySettings().setHost(a.getHostString()).setPort(a.getPort()).setSecure(false);
+            }
+            socket = wsFactory.createSocket(url);
             socket.addListener(new WebSocketAdapter() {
                 @Override
                 public void onConnected(WebSocket ws, Map<String, List<String>> headers) {

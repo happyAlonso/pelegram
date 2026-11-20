@@ -213,6 +213,8 @@ public class WebviewActivity extends BaseFragment {
 
         AndroidUtilities.checkAndroidTheme(context, true);
         webView = new WebView(context);
+        // pelegram: no WebRTC while the VPN is on, its UDP ignores the proxy
+        org.telegram.messenger.vpn.WebViewProxyController.harden(webView);
         webView.getSettings().setJavaScriptEnabled(true);
         webView.getSettings().setDomStorageEnabled(true);
 

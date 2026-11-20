@@ -569,7 +569,9 @@ public class LivePlayer implements NotificationCenter.NotificationCenterDelegate
                         }
                     }
                 },
-                false
+                false,
+                org.telegram.messenger.vpn.VpnController.getInstance().callProxyHost(),
+                org.telegram.messenger.vpn.VpnController.getInstance().callProxyPort()
         );
         instance.setOnStateUpdatedListener(new Instance.OnStateUpdatedListener() {
             @Override

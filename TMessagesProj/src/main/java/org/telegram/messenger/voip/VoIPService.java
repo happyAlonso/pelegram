@@ -1160,7 +1160,7 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 				reqCall.protocol.udp_reflector = true;
 				reqCall.protocol.min_layer = CALL_MIN_LAYER;
 				reqCall.protocol.max_layer = Instance.getConnectionMaxLayer();
-				Collections.addAll(reqCall.protocol.library_versions, NativeInstance.getAllVersions());
+				Collections.addAll(reqCall.protocol.library_versions, VpnController.getInstance().callVersions(NativeInstance.getAllVersions()));
 				VoIPService.this.g_a = g_a;
 				reqCall.g_a_hash = Utilities.computeSHA256(g_a, 0, g_a.length);
 				reqCall.random_id = Utilities.random.nextInt();
@@ -2035,7 +2035,7 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 		req.protocol.max_layer = Instance.getConnectionMaxLayer();
 		req.protocol.min_layer = CALL_MIN_LAYER;
 		req.protocol.udp_p2p = req.protocol.udp_reflector = true;
-		Collections.addAll(req.protocol.library_versions, NativeInstance.getAllVersions());
+		Collections.addAll(req.protocol.library_versions, VpnController.getInstance().callVersions(NativeInstance.getAllVersions()));
 		ConnectionsManager.getInstance(currentAccount).sendRequest(req, (response, error) -> AndroidUtilities.runOnUIThread(() -> {
 			if (error != null) {
 				callFailed();
@@ -3214,7 +3214,7 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 						tgVoip[type].onRequestTimeComplete(taskPtr, ConnectionsManager.getInstance(currentAccount).getCurrentTimeMillis());
 					}
 				}
-			}, conference != null);
+			}, conference != null, VpnController.getInstance().callProxyHost(), VpnController.getInstance().callProxyPort());
 			tgVoip[type].setOnStateUpdatedListener((state, inTransition) -> updateConnectionState(type, state, inTransition));
 //			if (captureDevice[type] != 0 && type == 0 && convertingVoip != null && convertingVoip.hasVideoCapturer()) {
 //				tgVoip[type].setupOutgoingVideoCreated(captureDevice[type]);
@@ -3584,15 +3584,22 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 			// persistent state
 			final String persistentStateFilePath = new File(ApplicationLoader.applicationContext.getCacheDir(), "voip_persistent_state.json").getAbsolutePath();
 
-			// Route call media through the embedded VPN when the user opted in. The call keeps the modern
-			// engine; the native side relays its UDP media through the local proxy via SOCKS5 UDP
-			// ASSOCIATE (see NativeNetworkingImpl / Socks5UdpSocket). Works calling any Telegram user,
-			// both directions - the peer doesn't need anything special.
+			// pelegram: while the VPN is on, call media always goes through it. The modern engine relays
+			// its UDP media through the local proxy via SOCKS5 UDP ASSOCIATE (see NativeNetworkingImpl /
+			// Socks5UdpSocket), calling any Telegram user, both directions. While the core is not
+			// connected the call gets a dead port and fails instead of going direct.
 			final boolean routeCallsThroughVpn = VpnController.getInstance().shouldRouteCalls();
 			final String callVersion = privateCall.protocol.library_versions.get(0);
 			if (BuildVars.LOGS_ENABLED) {
 				FileLog.d("VoIP: routeCallsThroughVpn=" + routeCallsThroughVpn + " version=" + callVersion
-						+ " proxyPort=" + VpnController.getInstance().getProxyPort());
+						+ " proxyPort=" + VpnController.getInstance().callProxyPort());
+			}
+			if (routeCallsThroughVpn && !VpnController.TUNNEL_CALL_VERSIONS.contains(callVersion)) {
+				// only versions offered by callVersions() should get here; any other engine would send
+				// the media direct, so end the call instead
+				FileLog.e("VoIP: version " + callVersion + " can't use the VPN, ending the call");
+				callFailed(Instance.ERROR_INCOMPATIBLE);
+				return;
 			}
 
 			// endpoints - keep UDP relays; the native SOCKS5 UDP-associate carries them through the proxy.
@@ -3626,7 +3633,7 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 			Instance.Proxy proxy = null;
 			if (routeCallsThroughVpn) {
 				// point the call at the local sing-box inbound; the native side relays UDP via SOCKS5 (no auth)
-				proxy = new Instance.Proxy("127.0.0.1", VpnController.getInstance().getProxyPort(), "", "");
+				proxy = new Instance.Proxy("127.0.0.1", VpnController.getInstance().callProxyPort(), "", "");
 			}
 
 			// encryption key
@@ -4537,7 +4544,7 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 				req1.protocol.udp_p2p = req1.protocol.udp_reflector = true;
 				req1.protocol.min_layer = CALL_MIN_LAYER;
 				req1.protocol.max_layer = Instance.getConnectionMaxLayer();
-				Collections.addAll(req1.protocol.library_versions, NativeInstance.getAllVersions());
+				Collections.addAll(req1.protocol.library_versions, VpnController.getInstance().callVersions(NativeInstance.getAllVersions()));
 				ConnectionsManager.getInstance(currentAccount).sendRequest(req1, (response1, error1) -> AndroidUtilities.runOnUIThread(() -> {
 					if (error1 == null) {
 						if (BuildVars.LOGS_ENABLED) {

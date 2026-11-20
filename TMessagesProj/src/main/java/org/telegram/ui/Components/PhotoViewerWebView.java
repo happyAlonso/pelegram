@@ -281,6 +281,8 @@ public class PhotoViewerWebView extends FrameLayout {
                 super.onDetachedFromWindow();
             }
         };
+        // pelegram: no WebRTC while the VPN is on, its UDP ignores the proxy
+        org.telegram.messenger.vpn.WebViewProxyController.harden(webView);
         webView.getSettings().setJavaScriptEnabled(true);
         webView.getSettings().setDomStorageEnabled(true);
         if (Build.VERSION.SDK_INT >= 17) {

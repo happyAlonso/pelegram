@@ -470,6 +470,7 @@ public final class WebProxyTransport implements ForegroundDetector.Listener {
         WebView view;
         try {
             view = new WebView(ApplicationLoader.applicationContext);
+            org.telegram.messenger.vpn.WebViewProxyController.harden(view); // pelegram: no WebRTC while the VPN is on
         } catch (Exception e) {
             FileLog.e(e);
             failCarrier();

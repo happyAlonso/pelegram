@@ -295,7 +295,7 @@ public class VpnListActivity extends BaseFragment implements VpnController.Liste
                 autoSwitchTimeoutRow = -1;
                 autoSwitchInfoRow = -1;
             }
-            routeCallsRow = rowCount++;
+            routeCallsRow = -1; // calls always go through the VPN while it is on
             routeCallsInfoRow = rowCount++;
         } else {
             autoSwitchRow = -1;

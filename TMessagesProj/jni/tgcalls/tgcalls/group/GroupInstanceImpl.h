@@ -188,6 +188,9 @@ struct GroupInstanceDescriptor {
     std::function<void(bool)> onMutedSpeechActivityDetected;
     std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, int64_t, bool, int32_t)> e2eEncryptDecrypt;
     bool isConference{false};
+    // pelegram: the embedded VPN's local SOCKS5 proxy; port 0 = media goes direct (VPN off)
+    std::string proxyHost;
+    uint16_t proxyPort{0};
 };
 
 template <typename T>

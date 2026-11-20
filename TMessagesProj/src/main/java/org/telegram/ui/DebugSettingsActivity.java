@@ -310,6 +310,7 @@ public class DebugSettingsActivity extends UniversalFragment {
                 WebStorage.getInstance().deleteAllData();
                 try {
                     WebView webView = new WebView(ApplicationLoader.applicationContext);
+                    org.telegram.messenger.vpn.WebViewProxyController.harden(webView); // pelegram: no WebRTC while the VPN is on
                     webView.clearHistory();
                     webView.destroy();
                 } catch (Exception e) {

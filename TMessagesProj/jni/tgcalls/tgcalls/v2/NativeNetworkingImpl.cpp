@@ -18,6 +18,7 @@
 #include "TurnCustomizerImpl.h"
 #include "ReflectorRelayPortFactory.h"
 #include "Socks5UdpSocket.h"
+#include "Socks5PacketSocketFactory.h"
 #include "SctpDataChannelProviderInterfaceImpl.h"
 #include "StaticThreads.h"
 #include "platform/PlatformInterface.h"
@@ -217,43 +218,6 @@ public:
 private:
     std::unique_ptr<rtc::BasicPacketSocketFactory> _impl;
     bool _standaloneReflectorMode = false;
-};
-
-// Wraps a PacketSocketFactory so every UDP socket is relayed through the local
-// SOCKS5 proxy via UDP ASSOCIATE. This is how a modern call reaches Telegram
-// reflectors through the embedded VPN: the reflectors answer UDP, so we keep the
-// media UDP and tunnel it, instead of a TCP CONNECT tunnel they ignore. TCP
-// sockets and DNS keep going straight to the wrapped implementation.
-class Socks5PacketSocketFactory : public rtc::PacketSocketFactory {
-public:
-    Socks5PacketSocketFactory(std::unique_ptr<rtc::PacketSocketFactory> impl, rtc::SocketFactory *socketFactory, rtc::SocketAddress proxyAddress) :
-    _impl(std::move(impl)),
-    _socketFactory(socketFactory),
-    _proxyAddress(proxyAddress) {
-    }
-
-    virtual ~Socks5PacketSocketFactory() {
-    }
-
-    virtual rtc::AsyncPacketSocket *CreateUdpSocket(const rtc::SocketAddress& address, uint16_t min_port, uint16_t max_port) override {
-        return rtc::Socks5UdpSocket::Create(_socketFactory, address, _proxyAddress);
-    }
-
-    virtual rtc::AsyncListenSocket *CreateServerTcpSocket(const rtc::SocketAddress &local_address, uint16_t min_port, uint16_t max_port, int opts) override {
-        return _impl->CreateServerTcpSocket(local_address, min_port, max_port, opts);
-    }
-
-    virtual rtc::AsyncPacketSocket *CreateClientTcpSocket(const rtc::SocketAddress &local_address, const rtc::SocketAddress& remote_address, const rtc::ProxyInfo& proxy_info, const std::string &user_agent, const rtc::PacketSocketTcpOptions& tcp_options) override {
-        return _impl->CreateClientTcpSocket(local_address, remote_address, proxy_info, user_agent, tcp_options);
-    }
-
-    virtual std::unique_ptr<webrtc::AsyncDnsResolverInterface> CreateAsyncDnsResolver() override {
-        return _impl->CreateAsyncDnsResolver();
-    }
-private:
-    std::unique_ptr<rtc::PacketSocketFactory> _impl;
-    rtc::SocketFactory *_socketFactory = nullptr;
-    rtc::SocketAddress _proxyAddress;
 };
 
 class WrappedNetworkManager: public rtc::NetworkManager, public sigslot::has_slots<> {

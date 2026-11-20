@@ -7,6 +7,7 @@ import android.content.ContentValues;
 import android.content.Context;
 import android.content.ContextWrapper;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
 import android.media.MediaScannerConnection;
 import android.net.Uri;
 import android.os.Build;
@@ -34,10 +35,11 @@ import java.net.URL;
 import java.net.URLConnection;
 
 /**
- * A browser download that stays in this process while the VPN is on. Android's DownloadManager runs
- * in another process, so its request would go out direct with the real address. This one fetches
- * the file through {@link WebViewProxyController#openConnection(URL)} and writes it straight into
- * Downloads (MediaStore on Android 10+, the public Download folder before that).
+ * A download that stays in this process while the VPN is on: the in-app browser's page downloads
+ * and bot mini-app downloads. Android's DownloadManager runs in another process, so its request
+ * would go out direct with the real address. This one fetches the file through
+ * {@link WebViewProxyController#openConnection(URL)} and writes it straight into Downloads
+ * (MediaStore on Android 10+, the public Download folder before that).
  */
 public final class TunnelDownload {
 
@@ -48,9 +50,29 @@ public final class TunnelDownload {
     private TunnelDownload() {
     }
 
-    /** Whether a browser download must use {@link #start} instead of DownloadManager. */
+    /** Whether a download must use {@link #start} instead of DownloadManager. */
     public static boolean needed() {
         return WebViewProxyController.isRouted();
+    }
+
+    /** A running download: progress for a list row, and a way to stop it. */
+    public static final class Job {
+        public volatile long loaded;
+        /** -1 while the size is unknown. */
+        public volatile long total = -1;
+        volatile boolean cancelled;
+
+        public void cancel() {
+            cancelled = true;
+        }
+    }
+
+    public interface Listener {
+        /**
+         * Runs once on the UI thread. {@code error} is null when the file is saved, else the reason
+         * it is not, as text for the user. {@code file} is the saved file when its path is known.
+         */
+        void onDone(File file, String error);
     }
 
     private static final class Failure extends Exception {
@@ -59,33 +81,40 @@ public final class TunnelDownload {
         }
     }
 
-    /**
-     * Downloads {@code url} through the tunnel into Downloads as {@code filename}. {@code onDone}
-     * runs once on the UI thread: null when the file is saved, else the reason it is not, as text for
-     * the user.
-     */
-    public static void start(Context context, String url, String userAgent, String mimeType, String filename,
-                             Utilities.Callback<String> onDone) {
+    /** {@link #start(Context, String, String, String, String, Listener)} for a caller that needs only the result text. */
+    public static Job start(Context context, String url, String userAgent, String mimeType, String filename,
+                            Utilities.Callback<String> onDone) {
+        return start(context, url, userAgent, mimeType, filename, (file, error) -> onDone.run(error));
+    }
+
+    /** Downloads {@code url} through the tunnel into Downloads as {@code filename}. */
+    public static Job start(Context context, String url, String userAgent, String mimeType, String filename,
+                            Listener listener) {
+        final Job job = new Job();
         if (WebViewProxyController.isBlocked()) {
-            onDone.run(LocaleController.getString(R.string.VpnWebDownloadNotConnected));
-            return;
+            // posted, so a caller that registers the download after start() returns sees the result
+            final String reason = LocaleController.getString(R.string.VpnWebDownloadNotConnected);
+            AndroidUtilities.runOnUIThread(() -> listener.onDone(null, reason));
+            return job;
         }
-        if (Build.VERSION.SDK_INT >= 23 && Build.VERSION.SDK_INT <= 28
+        if (Build.VERSION.SDK_INT >= 23 && Build.VERSION.SDK_INT <= 28 && context != null
                 && context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
             Activity activity = findActivity(context);
             if (activity != null) {
                 activity.requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, 4);
             }
-            onDone.run(LocaleController.getString(R.string.VpnWebDownloadNoStorage));
-            return;
+            final String reason = LocaleController.getString(R.string.VpnWebDownloadNoStorage);
+            AndroidUtilities.runOnUIThread(() -> listener.onDone(null, reason));
+            return job;
         }
         final String name = safeName(filename);
         new Thread(() -> {
             String error = null;
+            File saved = null;
             try {
-                long bytes = download(url, userAgent, mimeType, name);
+                saved = download(job, url, userAgent, mimeType, name);
                 if (BuildVars.LOGS_ENABLED) {
-                    FileLog.d("TunnelDownload: " + bytes + " bytes through the VPN");
+                    FileLog.d("TunnelDownload: " + job.loaded + " bytes through the VPN");
                 }
             } catch (Failure e) {
                 error = e.getMessage();
@@ -96,11 +125,13 @@ public final class TunnelDownload {
                         ? R.string.VpnWebDownloadNotConnected : R.string.VpnWebDownloadBroken);
             }
             final String result = error;
-            AndroidUtilities.runOnUIThread(() -> onDone.run(result));
+            final File file = saved;
+            AndroidUtilities.runOnUIThread(() -> listener.onDone(file, result));
         }, "TunnelDownload").start();
+        return job;
     }
 
-    private static long download(String startUrl, String userAgent, String mimeType, String name) throws Exception {
+    private static File download(Job job, String startUrl, String userAgent, String mimeType, String name) throws Exception {
         URL url = new URL(startUrl);
         HttpURLConnection conn = null;
         try {
@@ -138,9 +169,10 @@ public final class TunnelDownload {
                 }
                 break;
             }
+            job.total = conn.getContentLength();
             String mime = mimeFor(name, conn.getContentType(), mimeType);
             try (InputStream in = conn.getInputStream()) {
-                return save(in, name, mime);
+                return save(job, in, name, mime);
             }
         } finally {
             if (conn != null) {
@@ -150,7 +182,7 @@ public final class TunnelDownload {
     }
 
     /** Writes the stream into Downloads; a partial file is removed when the copy fails. */
-    private static long save(InputStream in, String name, String mime) throws Exception {
+    private static File save(Job job, InputStream in, String name, String mime) throws Exception {
         Context context = ApplicationLoader.applicationContext;
         if (Build.VERSION.SDK_INT >= 29) {
             ContentResolver resolver = context.getContentResolver();
@@ -166,18 +198,17 @@ public final class TunnelDownload {
             }
             boolean ok = false;
             try {
-                long n;
                 try (OutputStream out = resolver.openOutputStream(uri)) {
                     if (out == null) {
                         throw new Failure(LocaleController.getString(R.string.VpnWebDownloadNoStorage));
                     }
-                    n = copy(in, out);
+                    copy(job, in, out);
                 }
                 values.clear();
                 values.put(MediaStore.Downloads.IS_PENDING, 0);
                 resolver.update(uri, values, null, null);
                 ok = true;
-                return n;
+                return pathOf(resolver, uri);
             } finally {
                 if (!ok) {
                     try {
@@ -194,13 +225,12 @@ public final class TunnelDownload {
         File file = unique(dir, name);
         boolean ok = false;
         try {
-            long n;
             try (OutputStream out = new FileOutputStream(file)) {
-                n = copy(in, out);
+                copy(job, in, out);
             }
             ok = true;
             MediaScannerConnection.scanFile(context, new String[]{file.getAbsolutePath()}, mime == null ? null : new String[]{mime}, null);
-            return n;
+            return file;
         } finally {
             if (!ok) {
                 file.delete();
@@ -208,15 +238,30 @@ public final class TunnelDownload {
         }
     }
 
-    private static long copy(InputStream in, OutputStream out) throws IOException {
+    /** The file behind a MediaStore row, for a caller that opens it later; null when unknown. */
+    @SuppressWarnings("deprecation")
+    private static File pathOf(ContentResolver resolver, Uri uri) {
+        try (Cursor c = resolver.query(uri, new String[]{MediaStore.MediaColumns.DATA}, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                String path = c.getString(0);
+                return TextUtils.isEmpty(path) ? null : new File(path);
+            }
+        } catch (Throwable e) {
+            FileLog.e(e);
+        }
+        return null;
+    }
+
+    private static void copy(Job job, InputStream in, OutputStream out) throws Exception {
         byte[] buf = new byte[64 * 1024];
-        long total = 0;
         int n;
         while ((n = in.read(buf)) != -1) {
+            if (job.cancelled) {
+                throw new Failure("cancelled");
+            }
             out.write(buf, 0, n);
-            total += n;
+            job.loaded += n;
         }
-        return total;
     }
 
     private static File unique(File dir, String name) {

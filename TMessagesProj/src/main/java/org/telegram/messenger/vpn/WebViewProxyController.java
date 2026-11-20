@@ -18,7 +18,7 @@ import java.net.URLConnection;
  * browser {@code BotWebViewContainer.MyWebView}, Instant View, embeds, media players, bot mini-apps)
  * through a process-wide WebView proxy override, and the browser's own Java requests (address bar
  * suggestions, popups, tonsite, favicons, file fetches, embedded players, downloads) through
- * {@link #openConnection(URL)}. Driven by {@link VpnController#updateBrowserRouting()}.
+ * {@link #openConnection(URL)}. Driven by {@link VpnController#updateRouting()}.
  *
  * Three targets: the core's port while the tunnel is up; {@link #BLOCK_PORT} while the VPN is on but
  * the tunnel is not up (connecting, a core restart, an error), so pages and requests fail instead of
@@ -51,6 +51,17 @@ public class WebViewProxyController {
     /** The VPN is on but the tunnel is not up: pages and browser requests fail instead of going direct. */
     public static void block() {
         set(BLOCK_PORT);
+    }
+
+    /**
+     * At process start with the VPN on, before {@link VpnController} has loaded: block the app's own
+     * Java requests without touching the WebView provider. The next {@link #block()} or
+     * {@link #apply(int)} also sets the WebView override.
+     */
+    static void blockJavaEarly() {
+        if (target == DIRECT) {
+            target = BLOCK_PORT;
+        }
     }
 
     /** The VPN is off: remove the override, browser traffic goes direct again. */
@@ -117,6 +128,97 @@ public class WebViewProxyController {
     public static URLConnection openConnection(URL url) throws IOException {
         Proxy proxy = javaProxy();
         return proxy == Proxy.NO_PROXY ? url.openConnection() : url.openConnection(proxy);
+    }
+
+    /**
+     * Injected at document start into every frame of a WebView created while the VPN is on: removes
+     * the WebRTC constructors, whose UDP (STUN, ICE candidates) the proxy override does not cover.
+     */
+    public static final String NO_WEBRTC_SCRIPT = "(function(){['RTCPeerConnection','webkitRTCPeerConnection','mozRTCPeerConnection']"
+            + ".forEach(function(k){try{Object.defineProperty(window,k,{value:undefined,writable:false,configurable:false});}catch(e){}});})();";
+
+    /**
+     * Called right after a WebView is created: while the VPN is on, its pages get no WebRTC (see
+     * {@link #NO_WEBRTC_SCRIPT}). A WebView created while the VPN is off keeps WebRTC until it is
+     * created again.
+     */
+    public static void harden(android.webkit.WebView webView) {
+        if (webView == null || !isRouted()) {
+            return;
+        }
+        try {
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                androidx.webkit.WebViewCompat.addDocumentStartJavaScript(webView, NO_WEBRTC_SCRIPT, java.util.Collections.singleton("*"));
+            } else if (!unsupportedLogged) {
+                FileLog.e("WebViewProxy: the system WebView cannot run a document-start script, WebRTC stays on");
+            }
+        } catch (Throwable e) {
+            FileLog.e(e);
+        }
+    }
+
+    private static boolean selectorInstalled;
+
+    /**
+     * A second layer for Java HTTP in libraries we don't call ourselves (the Stripe SDK, Firebase,
+     * anything that does {@code url.openConnection()}): while the VPN is on they get the core's port
+     * as their proxy. Not fail closed: Android's HttpURLConnection appends one direct attempt after
+     * a ProxySelector's proxies (AOSP okhttp RouteSelector.resetNextProxy), so a failed proxy
+     * connection still goes direct. That is why every request site we own passes an explicit proxy
+     * through {@link #openConnection(URL)}. With the VPN off the previous selector answers, so a
+     * Wi-Fi or PAC proxy still applies. Installed once per process at startup.
+     */
+    public static synchronized void installProxySelector() {
+        if (selectorInstalled) {
+            return;
+        }
+        selectorInstalled = true;
+        try {
+            final java.net.ProxySelector system = java.net.ProxySelector.getDefault();
+            java.net.ProxySelector.setDefault(new java.net.ProxySelector() {
+                @Override
+                public java.util.List<Proxy> select(java.net.URI uri) {
+                    int port = target;
+                    String host = uri == null ? null : uri.getHost();
+                    boolean loopback = host != null && (host.equals("localhost") || host.startsWith("127.") || host.equals("::1") || host.equals("[::1]"));
+                    if (port == DIRECT || loopback || isLocalNetwork(host)) {
+                        return system != null ? system.select(uri) : java.util.Collections.singletonList(Proxy.NO_PROXY);
+                    }
+                    return java.util.Collections.singletonList(new Proxy(Proxy.Type.HTTP, new InetSocketAddress("127.0.0.1", port)));
+                }
+
+                @Override
+                public void connectFailed(java.net.URI uri, java.net.SocketAddress sa, IOException ioe) {
+                    if (system != null && target == DIRECT) {
+                        system.connectFailed(uri, sa, ioe);
+                    }
+                }
+            });
+        } catch (Throwable e) {
+            FileLog.e(e);
+        }
+    }
+
+    /** A literal address on the local network (a cast device, a LAN server): the tunnel can't reach it. */
+    static boolean isLocalNetwork(String host) {
+        if (host == null) {
+            return false;
+        }
+        String h = host.startsWith("[") && host.endsWith("]") ? host.substring(1, host.length() - 1) : host;
+        if (h.startsWith("10.") || h.startsWith("192.168.") || h.startsWith("169.254.")) {
+            return true;
+        }
+        if (h.startsWith("172.")) {
+            int dot = h.indexOf('.', 4);
+            try {
+                int second = Integer.parseInt(dot > 0 ? h.substring(4, dot) : "");
+                return second >= 16 && second <= 31;
+            } catch (NumberFormatException e) {
+                return false;
+            }
+        }
+        String lower = h.toLowerCase();
+        return lower.startsWith("fe80:") || (lower.indexOf(':') > 0 && (lower.startsWith("fc") || lower.startsWith("fd")));
     }
 
     /** Whether the VPN is on but the tunnel is not up yet, so browser traffic is blocked. */

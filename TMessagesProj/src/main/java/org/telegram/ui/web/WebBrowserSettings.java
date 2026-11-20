@@ -394,6 +394,7 @@ public class WebBrowserSettings extends UniversalFragment implements Notificatio
                     WebStorage.getInstance().deleteAllData();
                     try {
                         WebView webView = new WebView(getContext());
+                        org.telegram.messenger.vpn.WebViewProxyController.harden(webView); // pelegram: no WebRTC while the VPN is on
                         webView.clearCache(true);
                         webView.clearHistory();
                         webView.destroy();

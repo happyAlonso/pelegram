@@ -103,7 +103,7 @@ public final class ExtendedDefaultDataSource implements DataSource {
             boolean allowCrossProtocolRedirects) {
         this(
             context,
-            new DefaultHttpDataSource.Factory()
+            new androidx.media3.datasource.TunnelHttpDataSource.Factory()
                 .setUserAgent(userAgent)
                 .setConnectTimeoutMs(connectTimeoutMillis)
                 .setReadTimeoutMs(readTimeoutMillis)

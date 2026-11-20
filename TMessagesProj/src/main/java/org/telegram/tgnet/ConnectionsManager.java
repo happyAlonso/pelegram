@@ -682,7 +682,13 @@ public class ConnectionsManager extends BaseController {
     public void init(int version, int layer, int apiId, String deviceModel, String systemVersion, String appVersion, String langCode, String systemLangCode, String configPath, String logPath, String regId, String cFingerprint, int timezoneOffset, long userId, boolean userPremium, boolean enablePushConnection) {
         final SharedPreferences preferences = ApplicationLoader.applicationContext.getSharedPreferences("mainconfig", Activity.MODE_PRIVATE);
         final ProxySettings proxySettings = ProxySettings.fromSharedPreferences(preferences);
-        if (preferences.getBoolean("proxy_enabled", false) && proxySettings.isValid()) {
+        final int vpnPort = org.telegram.messenger.vpn.TgnetRouting.startPort();
+        if (vpnPort != org.telegram.messenger.vpn.TgnetRouting.DIRECT) {
+            // pelegram: the VPN is on. Start on the port the other accounts use, which is a dead local
+            // port until the core is up, instead of direct (TgnetRouting)
+            native_setVpnTunnelActive(currentAccount, vpnPort != org.telegram.messenger.vpn.WebViewProxyController.BLOCK_PORT);
+            native_setProxySettings(currentAccount, "127.0.0.1", vpnPort, "", "", "");
+        } else if (preferences.getBoolean("proxy_enabled", false) && proxySettings.isValid()) {
             if (proxySettings.getType() == ProxySettings.Type.WEB) {
                 int localPort = WebProxyTransport.start(proxySettings.getAddress(), proxySettings.getSecret());
                 native_setProxySettings(currentAccount, "127.0.0.1", localPort != 0 ? localPort : 9, "", "",
@@ -785,6 +791,14 @@ public class ConnectionsManager extends BaseController {
 
     public long checkProxy(ProxySettings settings, RequestTimeDelegate requestTimeDelegate) {
         if (settings == null || !settings.isValid()) {
+            return 0;
+        }
+        // pelegram: while the VPN carries tgnet, a check of the user's own proxies would connect to
+        // them direct. Only the VPN's own checks (127.0.0.1) run; the others report "unavailable"
+        if (org.telegram.messenger.vpn.TgnetRouting.holdsProxy() && !"127.0.0.1".equals(settings.getAddress())) {
+            if (requestTimeDelegate != null) {
+                AndroidUtilities.runOnUIThread(() -> requestTimeDelegate.run(-1));
+            }
             return 0;
         }
         if (settings.getType() == ProxySettings.Type.WEB) {
@@ -996,6 +1010,20 @@ public class ConnectionsManager extends BaseController {
     }
 
     public static void setProxySettings(boolean enabled, ProxySettings settings) {
+        // pelegram: while the VPN is on, TgnetRouting owns tgnet's proxy. The user's own proxy screens,
+        // tg://proxy links and proxy rotation save their choice in prefs as before, and it applies when
+        // the VPN is turned off (TgnetRouting.clear restores it)
+        if (org.telegram.messenger.vpn.TgnetRouting.holdsProxy()) {
+            if (BuildVars.LOGS_ENABLED) {
+                FileLog.d("setProxySettings ignored while the VPN carries tgnet");
+            }
+            return;
+        }
+        applyProxySettings(enabled, settings);
+    }
+
+    /** pelegram: the proxy change itself, past the VPN guard above. TgnetRouting calls it directly. */
+    public static void applyProxySettings(boolean enabled, ProxySettings settings) {
         String address = "";
         int port = 0;
         String username = "";
@@ -1244,7 +1272,7 @@ public class ConnectionsManager extends BaseController {
             boolean done = false;
             try {
                 URL downloadUrl = new URL("https://www.google.com/resolve?name=" + currentHostName + "&type=A");
-                URLConnection httpConnection = downloadUrl.openConnection();
+                URLConnection httpConnection = org.telegram.messenger.vpn.WebViewProxyController.openConnection(downloadUrl);
                 httpConnection.addRequestProperty("User-Agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 10_0 like Mac OS X) AppleWebKit/602.1.38 (KHTML, like Gecko) Version/10.0 Mobile/14A5297c Safari/602.1");
                 httpConnection.addRequestProperty("Host", "dns.google.com");
                 httpConnection.setConnectTimeout(1000);
@@ -1297,7 +1325,8 @@ public class ConnectionsManager extends BaseController {
 
                 }
             }
-            if (!done) {
+            // pelegram: no lookup through the system resolver while the VPN is on, it would ask the ISP
+            if (!done && !org.telegram.messenger.vpn.WebViewProxyController.isRouted()) {
                 try {
                     InetAddress address = InetAddress.getByName(currentHostName);
                     ArrayList<String> addresses = new ArrayList<>(1);
@@ -1349,7 +1378,7 @@ public class ConnectionsManager extends BaseController {
                     padding.append(characters.charAt(Utilities.random.nextInt(characters.length())));
                 }
                 URL downloadUrl = new URL("https://dns.google.com/resolve?name=" + domain + "&type=ANY&random_padding=" + padding);
-                URLConnection httpConnection = downloadUrl.openConnection();
+                URLConnection httpConnection = org.telegram.messenger.vpn.WebViewProxyController.openConnection(downloadUrl);
                 httpConnection.addRequestProperty("User-Agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 10_0 like Mac OS X) AppleWebKit/602.1.38 (KHTML, like Gecko) Version/10.0 Mobile/14A5297c Safari/602.1");
                 httpConnection.setConnectTimeout(5000);
                 httpConnection.setReadTimeout(5000);
@@ -1469,7 +1498,7 @@ public class ConnectionsManager extends BaseController {
                     padding.append(characters.charAt(Utilities.random.nextInt(characters.length())));
                 }
                 URL downloadUrl = new URL("https://mozilla.cloudflare-dns.com/dns-query?name=" + domain + "&type=TXT&random_padding=" + padding);
-                URLConnection httpConnection = downloadUrl.openConnection();
+                URLConnection httpConnection = org.telegram.messenger.vpn.WebViewProxyController.openConnection(downloadUrl);
                 httpConnection.addRequestProperty("User-Agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 10_0 like Mac OS X) AppleWebKit/602.1.38 (KHTML, like Gecko) Version/10.0 Mobile/14A5297c Safari/602.1");
                 httpConnection.addRequestProperty("accept", "application/dns-json");
                 httpConnection.setConnectTimeout(5000);

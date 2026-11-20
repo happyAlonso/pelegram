@@ -9146,6 +9146,8 @@ public class ArticleViewer extends IArticleViewer implements NotificationCenter.
 
             public TouchyWebView(Context context) {
                 super(context);
+                // pelegram: no WebRTC while the VPN is on, its UDP ignores the proxy
+                org.telegram.messenger.vpn.WebViewProxyController.harden(this);
                 setFocusable(false);
             }
 

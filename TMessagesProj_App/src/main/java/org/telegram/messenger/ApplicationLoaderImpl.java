@@ -186,7 +186,7 @@ public class ApplicationLoaderImpl extends ApplicationLoader {
         File dir = new File(ApplicationLoader.applicationContext.getCacheDir(), "updates");
         dir.mkdirs();
         File out = new File(dir, "pelegram-update.apk");
-        HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
+        HttpURLConnection conn = (HttpURLConnection) org.telegram.messenger.vpn.WebViewProxyController.openConnection(new URL(urlStr));
         conn.setInstanceFollowRedirects(true);
         conn.setConnectTimeout(15000);
         conn.setReadTimeout(30000);
@@ -266,7 +266,7 @@ public class ApplicationLoaderImpl extends ApplicationLoader {
     }
 
     private static String httpGetString(String urlStr) throws Exception {
-        HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
+        HttpURLConnection conn = (HttpURLConnection) org.telegram.messenger.vpn.WebViewProxyController.openConnection(new URL(urlStr));
         conn.setInstanceFollowRedirects(true);
         conn.setConnectTimeout(15000);
         conn.setReadTimeout(20000);

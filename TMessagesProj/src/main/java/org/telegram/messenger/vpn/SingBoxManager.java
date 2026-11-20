@@ -29,8 +29,9 @@ import libbox.SystemProxyStatus;
  * Runs the embedded sing-box core in app-scoped SOCKS mode and points tgnet's proxy at it.
  *
  * Flow: build a config exposing a local SOCKS5 on 127.0.0.1:localPort -> start the core ->
- * ConnectionsManager.setProxySettings(true, <SOCKS5 127.0.0.1:localPort>). On stop, close
- * the core and clear the proxy. tgnet already speaks SOCKS5, so no native changes are involved.
+ * TgnetRouting.apply(localPort) (tgnet's SOCKS5 proxy). On stop, close the core and leave tgnet on
+ * the closed port: VpnController blocks or clears it (see TgnetRouting), it never goes direct while
+ * the VPN is on. tgnet already speaks SOCKS5, so no native changes are involved.
  *
  * This is the integration scaffold - lifecycle + wiring are complete; on-device tuning (config
  * interop for vless-xhttp / AmneziaWG, and moving the URLTest health check onto the CommandClient)
@@ -358,15 +359,8 @@ public class SingBoxManager implements CommandServerHandler {
             }
         }
 
-        // Point tgnet at the local SOCKS5. Empty secret/user/pass = plain SOCKS5 path. Flag the
-        // tunnel first: setProxySettings reconnects every datacenter, and those first dials must
-        // already rotate addresses and keep the IPv4-only strategy (see ConnectionsManager).
-        ConnectionsManager.setVpnTunnelActive(true);
-        ConnectionsManager.setProxySettings(true, ProxySettings.builder()
-                .setType(ProxySettings.Type.SOCKS5)
-                .setAddress("127.0.0.1")
-                .setPort(localPort)
-                .build());
+        // Point tgnet at the local SOCKS5 (plain SOCKS5 path, no secret/user/pass).
+        TgnetRouting.apply(localPort);
         setState(STATE_CONNECTED, null);
     }
 
@@ -390,12 +384,9 @@ public class SingBoxManager implements CommandServerHandler {
             localPort = -1;
             activeSession = null;
         }
-        // Clear the proxy so Telegram goes direct once the tunnel is down.
-        try {
-            ConnectionsManager.setProxySettings(false, null);
-            ConnectionsManager.setVpnTunnelActive(false);
-        } catch (Throwable ignored) {
-        }
+        // tgnet keeps pointing at this core's port, now closed, so it reaches nothing. It never goes
+        // direct here: VpnController.updateRouting() moves it to the block port while the VPN is on,
+        // and clears it only when the VPN is turned off (TgnetRouting).
     }
 
     private void ensureSetup() throws Exception {

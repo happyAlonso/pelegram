@@ -1568,6 +1568,8 @@ public class WebPlayerView extends ViewGroup implements VideoPlayer.VideoPlayerD
             }
         }), interfaceName);
         final WebSettings webSettings = webView.getSettings();
+        // pelegram: no WebRTC while the VPN is on, its UDP ignores the proxy
+        org.telegram.messenger.vpn.WebViewProxyController.harden(webView);
         webSettings.setJavaScriptEnabled(true);
         webSettings.setDefaultTextEncodingName("utf-8");
 

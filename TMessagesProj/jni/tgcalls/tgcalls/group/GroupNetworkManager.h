@@ -23,6 +23,7 @@
 
 namespace rtc {
 class BasicPacketSocketFactory;
+class PacketSocketFactory;
 class BasicNetworkManager;
 class PacketTransportInternal;
 struct NetworkRoute;
@@ -66,7 +67,9 @@ public:
         std::function<void(uint32_t, uint8_t, bool)> audioActivityUpdated,
         bool zeroAudioLevel,
         std::function<void(uint32_t)> anyActivityUpdated,
-        std::shared_ptr<Threads> threads);
+        std::shared_ptr<Threads> threads,
+        std::string proxyHost = std::string(),
+        uint16_t proxyPort = 0);
     ~GroupNetworkManager();
 
     void start();
@@ -110,7 +113,10 @@ private:
     std::function<void(uint32_t)> _anyActivityUpdated;
 
     std::unique_ptr<rtc::NetworkMonitorFactory> _networkMonitorFactory;
-    std::unique_ptr<rtc::BasicPacketSocketFactory> _socketFactory;
+    // pelegram: a SOCKS5 UDP wrapper around the basic factory while the VPN carries the call
+    std::unique_ptr<rtc::PacketSocketFactory> _socketFactory;
+    std::string _proxyHost;
+    uint16_t _proxyPort = 0;
     std::unique_ptr<rtc::BasicNetworkManager> _networkManager;
     std::unique_ptr<webrtc::TurnCustomizer> _turnCustomizer;
     std::unique_ptr<cricket::BasicPortAllocator> _portAllocator;

@@ -366,6 +366,8 @@ public class WebInstantView {
         settings.setAllowContentAccess(false);
         settings.setDatabaseEnabled(false);
         settings.setAllowFileAccess(false);
+        // pelegram: no WebRTC while the VPN is on, its UDP ignores the proxy
+        org.telegram.messenger.vpn.WebViewProxyController.harden(webView);
         settings.setJavaScriptEnabled(true);
         settings.setSaveFormData(false);
         settings.setGeolocationEnabled(false);

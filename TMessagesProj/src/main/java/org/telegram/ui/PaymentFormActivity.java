@@ -1211,6 +1211,8 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                         super.onMeasure(widthMeasureSpec, heightMeasureSpec);
                     }
                 };
+                // pelegram: no WebRTC while the VPN is on, its UDP ignores the proxy
+                org.telegram.messenger.vpn.WebViewProxyController.harden(webView);
                 webView.getSettings().setJavaScriptEnabled(true);
                 webView.getSettings().setDomStorageEnabled(true);
 
@@ -2493,6 +2495,8 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                         }
                     };
                     webView.setBackgroundColor(0xffffffff);
+                    // pelegram: no WebRTC while the VPN is on, its UDP ignores the proxy
+                    org.telegram.messenger.vpn.WebViewProxyController.harden(webView);
                     webView.getSettings().setJavaScriptEnabled(true);
                     webView.getSettings().setDomStorageEnabled(true);
 
@@ -4016,7 +4020,7 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                             } else {
                                 connectionUrl = new URL("https://tgb.smart-glocal.com/cds/v1/tokenize/card");
                             }
-                            conn = (HttpURLConnection) connectionUrl.openConnection();
+                            conn = (HttpURLConnection) org.telegram.messenger.vpn.WebViewProxyController.openConnection(connectionUrl);
                             conn.setConnectTimeout(30 * 1000);
                             conn.setReadTimeout(80 * 1000);
                             conn.setUseCaches(false);
