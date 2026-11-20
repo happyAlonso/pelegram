@@ -78,7 +78,7 @@ public class HttpGetFileTask extends AsyncTask<String, Void, File> {
             boolean resuming = i > 0;
             try {
                 URL url = new URL(urlString);
-                HttpURLConnection urlConnection = (HttpURLConnection) url.openConnection();
+                HttpURLConnection urlConnection = (HttpURLConnection) org.telegram.messenger.vpn.WebViewProxyController.openConnection(url);
                 urlConnection.setRequestMethod("GET");
                 if (resuming) {
                     urlConnection.setRequestProperty("Range", "bytes=" + downloadedSize + "-");

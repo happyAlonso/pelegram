@@ -32,7 +32,10 @@ need a separate VPN client just to use Telegram.
   same way the proxy list does.
 - **Calls and the in-app browser go through the tunnel too.** 1:1 calls (both directions, including
   with stock Telegram users) and the in-app browser / web views route through the VPN, with DNS
-  resolved on the far side of the tunnel.
+  resolved on the far side of the tunnel. The browser's own requests (address bar suggestions,
+  popups, favicons, embedded players) and its downloads use the tunnel as well. While the VPN is on,
+  web links always open in the in-app browser. If the tunnel is not connected yet, or is reconnecting
+  after a server switch, pages fail to load instead of going out with the real address.
 - **Subscription links.** An `https://` subscription link becomes one row in the VPN list. Its servers
   run as one group that sends new connections through the fastest one, and the list updates every
   hour. When auto-switch has moved to another key, the app checks the subscription through that key
@@ -112,6 +115,14 @@ the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg
   the logs sent that day did not cover the slow process. The app keeps 96 MB of logs (about three
   days), so a report sent before the app is restarted should show whether the slowdown is the tunnel
   or the app itself.
+- **Some requests outside the in-app browser still go direct while the VPN is on.** They are message
+  translation (translate.googleapis.com), images and music artwork that the app loads from web
+  addresses, card tokenization in the payment form, Telegram's DNS-over-HTTPS lookup of server
+  addresses, and video that the app's own player streams from a web address (embedded videos in
+  Instant View: media3's `DefaultHttpDataSource` opens its connection without a proxy). They go out
+  with the real address. Links tapped in a chat bubble open in the external browser, because
+  upstream never uses the in-app browser there. Links that you open with "Open in system browser",
+  and links that another installed app handles, leave pelegram and the tunnel on purpose.
 - **One AmneziaWG key on two devices.** A WireGuard server keeps one session per key, so two clients
   on the same key keep taking the session from each other, and the tunnel goes silent about 20 seconds
   after each handshake. No client-side change can fix that. pelegram detects it, marks the server

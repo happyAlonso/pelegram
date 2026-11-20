@@ -3913,7 +3913,7 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
         try {
             url = Browser.replaceHostname(Uri.parse(url), rotateTONHost(AndroidUtilities.getHostAuthority(url)), "https");
             URL urlObj = new URL(url);
-            HttpURLConnection urlConnection = (HttpURLConnection) urlObj.openConnection();
+            HttpURLConnection urlConnection = (HttpURLConnection) org.telegram.messenger.vpn.WebViewProxyController.openConnection(urlObj);
             urlConnection.setRequestMethod(method);
             if (headers != null) {
                 for (Map.Entry<String, String> e : headers.entrySet()) {
@@ -3989,6 +3989,35 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
 
         public void d(String s) {
             FileLog.d("[webview] #" + tag + " " + s);
+        }
+
+        // pelegram: while the VPN is on, a browser download stays in this process and goes through the
+        // tunnel. DownloadManager runs in another process and would fetch the file with the real address.
+        // Returns false when the VPN is off, so the caller uses DownloadManager as before.
+        private boolean downloadThroughTunnel(String url, String userAgent, String mimeType, String filename) {
+            if (!org.telegram.messenger.vpn.TunnelDownload.needed()) {
+                return false;
+            }
+            if (botWebViewContainer != null) {
+                BulletinFactory.of(botWebViewContainer, botWebViewContainer.resourcesProvider)
+                        .createSimpleBulletin(R.raw.ic_download, AndroidUtilities.replaceTags(formatString(R.string.WebDownloadingFile, filename)))
+                        .show(true);
+            }
+            org.telegram.messenger.vpn.TunnelDownload.start(getContext(), url, userAgent, mimeType, filename, error -> {
+                if (botWebViewContainer == null) {
+                    return;
+                }
+                if (error == null) {
+                    BulletinFactory.of(botWebViewContainer, botWebViewContainer.resourcesProvider)
+                            .createDownloadBulletin(BulletinFactory.FileType.UNKNOWN, botWebViewContainer.resourcesProvider)
+                            .show(true);
+                } else {
+                    BulletinFactory.of(botWebViewContainer, botWebViewContainer.resourcesProvider)
+                            .createErrorBulletin(AndroidUtilities.replaceTags(formatString(R.string.VpnWebDownloadFailed, filename, error)), botWebViewContainer.resourcesProvider)
+                            .show(true);
+                }
+            });
+            return true;
         }
 
         public MyWebView(Context context, boolean bot, long botId) {
@@ -4090,6 +4119,9 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
                                         if (filename == null) {
                                             filename = "image.png";
                                         }
+                                        if (downloadThroughTunnel(imageUrl, getSettings().getUserAgentString(), "image/*", filename)) {
+                                            return;
+                                        }
 
                                         DownloadManager.Request request = new DownloadManager.Request(Uri.parse(imageUrl));
                                         request.setMimeType("image/*");
@@ -4141,7 +4173,7 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
                         HttpURLConnection connection = null;
                         try {
                             URL connectionUrl = new URL(request.getUrl().toString());
-                            connection = (HttpURLConnection) connectionUrl.openConnection();
+                            connection = (HttpURLConnection) org.telegram.messenger.vpn.WebViewProxyController.openConnection(connectionUrl);
                             connection.setRequestMethod(request.getMethod());
                             if (request.getRequestHeaders() != null) {
                                 for (Map.Entry<String, String> e: request.getRequestHeaders().entrySet()) {
@@ -5023,6 +5055,9 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
 
                                 final Runnable download = () -> {
                                     try {
+                                        if (downloadThroughTunnel(url, userAgent, mimeType, filename)) {
+                                            return;
+                                        }
                                         DownloadManager.Request request = new DownloadManager.Request(Uri.parse(url));
                                         request.setMimeType(mimeType);
                                         request.addRequestHeader("User-Agent", userAgent);

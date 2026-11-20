@@ -33,7 +33,7 @@ public class HttpGetTask extends AsyncTask<String, Void, String> {
 
         try {
             URL url = new URL(urlString);
-            HttpURLConnection urlConnection = (HttpURLConnection) url.openConnection();
+            HttpURLConnection urlConnection = (HttpURLConnection) org.telegram.messenger.vpn.WebViewProxyController.openConnection(url);
             for (Map.Entry<String, String> e : headers.entrySet()) {
                 if (e.getKey() == null || e.getValue() == null) continue;
                 urlConnection.setRequestProperty(e.getKey(), e.getValue());

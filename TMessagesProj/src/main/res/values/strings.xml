@@ -85,6 +85,11 @@
     <string name="VpnLoginVpnOn">on, %1$s</string>
     <string name="VpnLoginVpnNotConnected">on, %1$s, not connected</string>
     <string name="VpnLoginUnknownCodeType">Telegram sent a type of login code that this version cannot show (%1$s). Please update pelegram.</string>
+    <string name="VpnWebDownloadFailed">Could not download **%1$s**: %2$s.</string>
+    <string name="VpnWebDownloadNotConnected">the VPN is not connected yet, try again when it connects</string>
+    <string name="VpnWebDownloadHttp">the server answered %1$d</string>
+    <string name="VpnWebDownloadNoStorage">pelegram has no access to Downloads, allow it and try again</string>
+    <string name="VpnWebDownloadBroken">the connection through the VPN broke</string>
     <string name="English">English</string>
     <string name="LanguageNameInEnglish">English</string>
     <string name="LanguageCode">en</string>

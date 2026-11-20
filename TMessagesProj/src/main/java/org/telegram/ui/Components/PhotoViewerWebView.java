@@ -317,7 +317,7 @@ public class PhotoViewerWebView extends FrameLayout {
                 if (isYouTube && url.startsWith("https://www.youtube.com/youtubei/v1/player?key=")) {
                     Utilities.externalNetworkQueue.postRunnable(()->{
                         try {
-                            HttpURLConnection con = (HttpURLConnection) new URL(url).openConnection();
+                            HttpURLConnection con = (HttpURLConnection) org.telegram.messenger.vpn.WebViewProxyController.openConnection(new URL(url));
                             con.setRequestMethod("POST");
                             for (Map.Entry<String, String> en : request.getRequestHeaders().entrySet()) {
                                 con.addRequestProperty(en.getKey(), en.getValue());

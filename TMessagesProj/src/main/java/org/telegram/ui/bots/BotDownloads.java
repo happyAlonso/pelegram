@@ -337,7 +337,7 @@ public class BotDownloads {
             protected String doInBackground(String... strings) {
                 try {
 
-                    HttpURLConnection urlConnection = (HttpURLConnection) new URL(url).openConnection();
+                    HttpURLConnection urlConnection = (HttpURLConnection) org.telegram.messenger.vpn.WebViewProxyController.openConnection(new URL(url));
                     urlConnection.setRequestMethod("GET");
                     urlConnection.setRequestProperty("Accept-Encoding", "identity");
                     urlConnection.setConnectTimeout(1000);

@@ -440,6 +440,7 @@ public class VpnController implements SingBoxManager.StateListener {
                 && SingBoxManager.getInstance().getState() == SingBoxManager.STATE_IDLE) {
             reconnect();
         }
+        updateBrowserRouting(); // before the first WebView: blocked until the core is up
         updateBackgroundKeepAlive();
         scheduleSubscriptionCheck(SUBSCRIPTION_FIRST_CHECK_MS);
         scheduleProbe(PROBE_DELAYS_MS[0]);
@@ -536,16 +537,34 @@ public class VpnController implements SingBoxManager.StateListener {
     }
 
     /**
-     * Whether in-app WebView traffic (the internal browser and every other in-process WebView) should
-     * currently go through the embedded proxy. True whenever the VPN is on and the core is actually
-     * connected with a live local port - the WebView proxy override is driven off this, and
-     * {@link org.telegram.messenger.browser.Browser} uses it to force the in-app browser over Custom
-     * Tabs so the traffic stays inside the tunnel.
+     * Whether web links must stay in the in-app browser: whenever the VPN is on, connected or not.
+     * {@link org.telegram.messenger.browser.Browser} uses it to skip Custom Tabs and the external
+     * browser, which run in another process and can't be tunnelled. While the tunnel is not up the
+     * in-app browser is blocked (see {@link #updateBrowserRouting()}), so a link fails instead of
+     * opening with the real address.
      */
     public boolean shouldRouteBrowser() {
-        return isEnabled()
-                && SingBoxManager.getInstance().getState() == SingBoxManager.STATE_CONNECTED
-                && SingBoxManager.getInstance().getLocalPort() > 0;
+        return isEnabled();
+    }
+
+    /**
+     * Points the in-app browser (every in-process WebView and the browser's own Java requests) at the
+     * core while it is connected, at a dead local port while the VPN is on but the core is not
+     * connected (start, restart, error), and direct only when the VPN is off. Fail closed: a page
+     * never goes out with the real address while the VPN is on.
+     */
+    void updateBrowserRouting() {
+        if (!isEnabled()) {
+            WebViewProxyController.clear();
+            return;
+        }
+        SingBoxManager m = SingBoxManager.getInstance();
+        int port = m.getLocalPort();
+        if (m.getState() == SingBoxManager.STATE_CONNECTED && port > 0) {
+            WebViewProxyController.apply(port);
+        } else {
+            WebViewProxyController.block();
+        }
     }
 
     public int getAutoSwitchTimeoutIndex() {
@@ -672,6 +691,7 @@ public class VpnController implements SingBoxManager.StateListener {
     private void stopCore() {
         pingToken++;
         SingBoxManager.getInstance().disconnect();
+        updateBrowserRouting(); // a core that was already down sends no state event
     }
 
     private void reconnect() {
@@ -735,6 +755,9 @@ public class VpnController implements SingBoxManager.StateListener {
         } else if (currentVpn != null && !TextUtils.isEmpty(currentVpn.key)) {
             SingBoxManager.getInstance().connect(currentVpn.key, standby, standbyServers);
         }
+        // at once: a first key added while the VPN is on must not leave the browser direct until the
+        // core's CONNECTING event reaches this thread
+        updateBrowserRouting();
     }
 
     /**
@@ -798,11 +821,11 @@ public class VpnController implements SingBoxManager.StateListener {
                 // (not just at connect) triggers auto-switch.
                 scheduleHealthCheck();
                 // Route all in-process WebViews (the in-app browser included) through the proxy too.
-                WebViewProxyController.apply(SingBoxManager.getInstance().getLocalPort());
+                updateBrowserRouting();
             } else {
                 AndroidUtilities.cancelRunOnUIThread(healthCheckRunnable);
                 stopTrial();
-                WebViewProxyController.clear();
+                updateBrowserRouting(); // blocked while the VPN is on, direct only when it is off
                 AndroidUtilities.cancelRunOnUIThread(groupFirstRoundRunnable);
                 for (VpnSubscription s : subscriptions) {
                     s.groupStatus = null; // the next core starts its tests from scratch

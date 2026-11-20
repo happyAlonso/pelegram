@@ -456,7 +456,7 @@ public class WebPlayerView extends ViewGroup implements VideoPlayer.VideoPlayerD
         URLConnection httpConnection = null;
         try {
             URL downloadUrl = new URL(url);
-            httpConnection = downloadUrl.openConnection();
+            httpConnection = org.telegram.messenger.vpn.WebViewProxyController.openConnection(downloadUrl);
             httpConnection.addRequestProperty("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:10.0) Gecko/20150101 Firefox/47.0 (Chrome)");
             if (tryGzip) {
                 httpConnection.addRequestProperty("Accept-Encoding", "gzip, deflate");
@@ -479,7 +479,7 @@ public class WebPlayerView extends ViewGroup implements VideoPlayer.VideoPlayerD
                     String newUrl = httpURLConnection.getHeaderField("Location");
                     String cookies = httpURLConnection.getHeaderField("Set-Cookie");
                     downloadUrl = new URL(newUrl);
-                    httpConnection = downloadUrl.openConnection();
+                    httpConnection = org.telegram.messenger.vpn.WebViewProxyController.openConnection(downloadUrl);
                     httpConnection.setRequestProperty("Cookie", cookies);
                     httpConnection.addRequestProperty("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:10.0) Gecko/20150101 Firefox/47.0 (Chrome)");
                     if (tryGzip) {
@@ -507,7 +507,7 @@ public class WebPlayerView extends ViewGroup implements VideoPlayer.VideoPlayerD
                     } catch (Exception ignore) {
 
                     }
-                    httpConnection = downloadUrl.openConnection();
+                    httpConnection = org.telegram.messenger.vpn.WebViewProxyController.openConnection(downloadUrl);
                     httpConnection.connect();
                     httpConnectionStream = httpConnection.getInputStream();
                 }
