@@ -350,6 +350,10 @@ void *ConnectionsManager::ThreadProc(void *data) {
 #ifdef ANDROID
     javaVm->AttachCurrentThread(&jniEnv[networkManager->instanceNum], nullptr);
 #endif
+    // pelegram: apply what Java queued before native_init (the proxy, the VPN flag) before the
+    // first connection exists. The push connection below used to dial with an empty proxy and
+    // go direct for a few ms at every cold start, until the first select() ran the tasks
+    networkManager->checkPendingTasks();
     if (networkManager->currentUserId != 0 && networkManager->pushConnectionEnabled) {
         Datacenter *datacenter = networkManager->getDatacenterWithId(networkManager->currentDatacenterId);
         if (datacenter != nullptr) {
@@ -3612,19 +3616,23 @@ void ConnectionsManager::setDelegate(ConnectiosManagerDelegate *connectiosManage
 }
 
 void ConnectionsManager::setPushConnectionEnabled(bool value) {
-    pushConnectionEnabled = value;
-    Datacenter *datacenter = getDatacenterWithId(currentDatacenterId);
-    if (datacenter != nullptr) {
-        if (!pushConnectionEnabled) {
-            Connection *connection = datacenter->getPushConnection(false);
-            if (connection != nullptr) {
-                connection->suspendConnection();
+    // pelegram: on the network thread, like setProxySettings. Called from a Java thread, this
+    // dialed the push connection there and could read the proxy before its queued task ran
+    scheduleTask([&, value] {
+        pushConnectionEnabled = value;
+        Datacenter *datacenter = getDatacenterWithId(currentDatacenterId);
+        if (datacenter != nullptr) {
+            if (!pushConnectionEnabled) {
+                Connection *connection = datacenter->getPushConnection(false);
+                if (connection != nullptr) {
+                    connection->suspendConnection();
+                }
+            } else {
+                datacenter->createPushConnection()->setSessionId(pushSessionId);
+                sendPing(datacenter, true);
             }
-        } else {
-            datacenter->createPushConnection()->setSessionId(pushSessionId);
-            sendPing(datacenter, true);
         }
-    }
+    });
 }
 
 inline bool checkPhoneByPrefixesRules(std::string phone, std::string rules) {
