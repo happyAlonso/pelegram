@@ -5,6 +5,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.text.TextUtils;
 
@@ -16,10 +17,16 @@ import org.telegram.ui.ActionBar.AlertDialog;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
+import java.net.ConnectException;
 import java.net.HttpURLConnection;
+import java.net.SocketTimeoutException;
 import java.net.URL;
+import java.net.UnknownHostException;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.regex.Pattern;
 
 public class ApplicationLoaderImpl extends ApplicationLoader {
 
@@ -29,6 +36,26 @@ public class ApplicationLoaderImpl extends ApplicationLoader {
     // /releases/latest returns only the newest full release (GitHub excludes prereleases and
     // drafts), so the in-app updater never offers a test prerelease - only promoted prod builds.
     private static final String RELEASES_API = "https://api.github.com/repos/happyAlonso/pelegram/releases/latest";
+    // the release page redirects /releases/latest to /releases/tag/<tag> of the same newest full
+    // release, and it is not under the API limit of 60 unauthenticated requests per hour and IP.
+    // A shared VPN exit runs out of that limit (403 "API rate limit exceeded", 25 Nov 2026), so
+    // the tag comes from the redirect and the API is asked only for the release notes
+    private static final String RELEASES_PAGE = "https://github.com/happyAlonso/pelegram/releases/latest";
+    private static final String DOWNLOAD_BASE = "https://github.com/happyAlonso/pelegram/releases/download/";
+    private static final Pattern TAG = Pattern.compile("v?\\d+\\.\\d+\\.\\d+");
+    // checks come on every resume of LaunchActivity: an answer is reused for CHECK_INTERVAL_MS
+    // and a failed check is tried again after RETRY_MS, unless the user asks (force)
+    private static final long CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000L;
+    private static final long RETRY_MS = 10 * 60 * 1000L;
+    private volatile long lastAnswerElapsed;
+    private volatile long lastTryElapsed;
+    private volatile boolean inFlight;
+    // at a cold start with the VPN on, onResume comes before the tunnel is up and a check would
+    // only hit the dead port, so it waits for the tunnel (UI thread only, one waiter at a time)
+    private static final long TUNNEL_WAIT_STEP_MS = 2000;
+    private static final int TUNNEL_WAIT_STEPS = 15;
+    private boolean waitingForTunnel;
+    private int tunnelWaits;
 
     private volatile BetaUpdate pendingUpdate;
     private volatile String pendingApkUrl;
@@ -80,46 +107,183 @@ public class ApplicationLoaderImpl extends ApplicationLoader {
 
     @Override
     public void checkUpdate(boolean force, Runnable whenDone) {
+        if (!force && org.telegram.messenger.vpn.WebViewProxyController.isBlocked()) {
+            if (waitingForTunnel) {
+                done(whenDone);
+                return;
+            }
+            waitingForTunnel = true;
+            tunnelWaits = 0;
+            AndroidUtilities.runOnUIThread(() -> waitForTunnel(whenDone), TUNNEL_WAIT_STEP_MS);
+            return;
+        }
+        checkNow(force, whenDone);
+    }
+
+    private void waitForTunnel(Runnable whenDone) {
+        if (org.telegram.messenger.vpn.WebViewProxyController.isBlocked() && ++tunnelWaits < TUNNEL_WAIT_STEPS) {
+            AndroidUtilities.runOnUIThread(() -> waitForTunnel(whenDone), TUNNEL_WAIT_STEP_MS);
+            return;
+        }
+        waitingForTunnel = false;
+        if (org.telegram.messenger.vpn.WebViewProxyController.isBlocked()) {
+            // still no tunnel: no request, the next resume tries again
+            done(whenDone);
+            return;
+        }
+        checkNow(false, whenDone);
+    }
+
+    private static void done(Runnable whenDone) {
+        AndroidUtilities.runOnUIThread(() -> {
+            if (whenDone != null) {
+                whenDone.run();
+            }
+        });
+    }
+
+    private void checkNow(boolean force, Runnable whenDone) {
+        long now = SystemClock.elapsedRealtime();
+        if (!force && (inFlight || (lastAnswerElapsed != 0 && now - lastAnswerElapsed < CHECK_INTERVAL_MS)
+                || (lastTryElapsed != 0 && now - lastTryElapsed < RETRY_MS))) {
+            // pendingUpdate still holds the last answer
+            done(whenDone);
+            return;
+        }
+        inFlight = true;
         Utilities.globalQueue.postRunnable(() -> {
-            BetaUpdate update = null;
-            String apkUrl = null;
             try {
-                JSONObject root = new JSONObject(httpGetString(RELEASES_API));
-                if (!root.optBoolean("prerelease", false) && !root.optBoolean("draft", false)) {
-                    String tag = root.optString("tag_name", "");
+                String tag = latestTagFromReleasePage();
+                BetaUpdate update = null;
+                String apkUrl = null;
+                if (tag != null) {
                     String version = (tag.startsWith("v") || tag.startsWith("V")) ? tag.substring(1) : tag;
-                    String changelog = root.optString("body", "");
-                    JSONArray assets = root.optJSONArray("assets");
-                    if (assets != null) {
-                        for (int i = 0; i < assets.length(); i++) {
-                            JSONObject a = assets.getJSONObject(i);
-                            if (a.optString("name", "").toLowerCase().endsWith(".apk")) {
-                                apkUrl = a.optString("browser_download_url", null);
-                                break;
+                    if (compareVersions(version, CURRENT_VERSION) > 0) {
+                        // every release ships its APK under this name (arm64-v8a only)
+                        apkUrl = DOWNLOAD_BASE + tag + "/pelegram-" + tag + "-arm64-v8a.apk";
+                        String changelog = "";
+                        try {
+                            JSONObject root = new JSONObject(httpGetString(RELEASES_API));
+                            if (tag.equals(root.optString("tag_name", ""))) {
+                                changelog = root.optString("body", "");
+                                String assetUrl = firstApkUrl(root);
+                                if (assetUrl != null) {
+                                    apkUrl = assetUrl;
+                                }
                             }
+                        } catch (Exception e) {
+                            // the dialog falls back to the VpnUpdateAvailable text
+                            FileLog.e("updater: no release notes for " + tag + ": " + e.getMessage());
                         }
-                    }
-                    if (apkUrl != null && compareVersions(version, CURRENT_VERSION) > 0) {
                         update = new BetaUpdate(version, versionToCode(version), changelog);
                     }
                 }
-            } catch (Exception e) {
-                FileLog.e(e);
-            }
-            pendingUpdate = update;
-            pendingApkUrl = update != null ? apkUrl : null;
-            AndroidUtilities.runOnUIThread(() -> {
-                if (whenDone != null) {
-                    whenDone.run();
+                if (BuildVars.LOGS_ENABLED) {
+                    FileLog.d("updater: newest release " + tag + ", this build " + CURRENT_VERSION
+                            + (update != null ? ", update offered" : ", nothing newer"));
                 }
-            });
+                pendingUpdate = update;
+                pendingApkUrl = apkUrl;
+                lastAnswerElapsed = SystemClock.elapsedRealtime();
+            } catch (Exception e) {
+                // keep an update found earlier. Only an answer from GitHub (a status, a bad tag)
+                // holds the next try for RETRY_MS, no network or no tunnel retries at the next resume
+                FileLog.e("updater: check failed: " + e);
+                boolean noAnswer = e instanceof ConnectException || e instanceof UnknownHostException
+                        || e instanceof SocketTimeoutException || org.telegram.messenger.vpn.WebViewProxyController.isBlocked();
+                if (!noAnswer) {
+                    lastTryElapsed = SystemClock.elapsedRealtime();
+                }
+            }
+            inFlight = false;
+            done(whenDone);
         });
+    }
+
+    /** the tag /releases/latest redirects to, or null while the repo has no full release */
+    private static String latestTagFromReleasePage() throws Exception {
+        HttpURLConnection conn = (HttpURLConnection) org.telegram.messenger.vpn.WebViewProxyController.openConnection(new URL(RELEASES_PAGE));
+        conn.setInstanceFollowRedirects(false);
+        conn.setConnectTimeout(15000);
+        conn.setReadTimeout(20000);
+        conn.setRequestProperty("User-Agent", "pelegram-updater");
+        try {
+            int code = conn.getResponseCode();
+            String location = conn.getHeaderField("Location");
+            if (code / 100 != 3 || location == null) {
+                throw new IOException("release page answered HTTP " + code + describeFailure(conn));
+            }
+            return tagFromLocation(location);
+        } finally {
+            conn.disconnect();
+        }
+    }
+
+    static String tagFromLocation(String location) throws Exception {
+        String marker = "/releases/tag/";
+        int i = location.indexOf(marker);
+        if (i < 0) {
+            return null; // github.com sends /releases when there is no full release yet
+        }
+        String tag = location.substring(i + marker.length());
+        for (char c : new char[]{'?', '#', '/'}) {
+            int end = tag.indexOf(c);
+            if (end >= 0) {
+                tag = tag.substring(0, end);
+            }
+        }
+        tag = URLDecoder.decode(tag, "UTF-8");
+        if (!TAG.matcher(tag).matches()) {
+            throw new IOException("unexpected release tag in redirect: " + tag);
+        }
+        return tag;
+    }
+
+    private static String firstApkUrl(JSONObject root) throws Exception {
+        JSONArray assets = root.optJSONArray("assets");
+        if (assets != null) {
+            for (int i = 0; i < assets.length(); i++) {
+                JSONObject a = assets.getJSONObject(i);
+                if (a.optString("name", "").toLowerCase().endsWith(".apk")) {
+                    return a.optString("browser_download_url", null);
+                }
+            }
+        }
+        return null;
+    }
+
+    /** status details for the log: rate-limit headers and the start of the error body, addresses masked */
+    private static String describeFailure(HttpURLConnection conn) {
+        StringBuilder sb = new StringBuilder();
+        for (String h : new String[]{"X-RateLimit-Remaining", "X-RateLimit-Reset", "Retry-After", "X-GitHub-Request-Id"}) {
+            String v = conn.getHeaderField(h);
+            if (v != null) {
+                sb.append(", ").append(h).append('=').append(v);
+            }
+        }
+        try (InputStream err = conn.getErrorStream()) {
+            if (err != null) {
+                byte[] buf = new byte[200];
+                int n = err.read(buf);
+                if (n > 0) {
+                    String body = new String(buf, 0, n, StandardCharsets.UTF_8)
+                            .replaceAll("\\d{1,3}(\\.\\d{1,3}){3}", "<ip>")
+                            .replaceAll("[0-9a-fA-F]{1,4}(:[0-9a-fA-F]{0,4}){2,7}", "<ip>");
+                    sb.append(", body: ").append(body.replace('\n', ' '));
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return sb.toString();
     }
 
     @Override
     public boolean showCustomUpdateAppPopup(Context context, BetaUpdate update, int account) {
         if (!(context instanceof Activity) || update == null) {
             return false;
+        }
+        if (((Activity) context).isFinishing() || ((Activity) context).isDestroyed()) {
+            return false; // a check that waited for the tunnel can outlive the activity
         }
         AndroidUtilities.runOnUIThread(() -> {
             Activity activity = (Activity) context;
@@ -273,6 +437,13 @@ public class ApplicationLoaderImpl extends ApplicationLoader {
         conn.setRequestProperty("Accept", "application/vnd.github+json");
         conn.setRequestProperty("User-Agent", "pelegram-updater");
         conn.connect();
+        int code = conn.getResponseCode();
+        if (code >= 400) {
+            // without this, Android's HttpURLConnection reports any of these as FileNotFoundException(url)
+            String detail = describeFailure(conn);
+            conn.disconnect();
+            throw new IOException("HTTP " + code + detail);
+        }
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
         try (InputStream in = conn.getInputStream()) {
             byte[] buf = new byte[8192];

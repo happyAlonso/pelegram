@@ -105,6 +105,12 @@ the connection and paste the resulting `vpn://...` key into pelegram. A raw `awg
 - **Higher battery use than the official client, by design.** The fork cannot use FCM, so it keeps
   tgnet's push connection on and runs a foreground service whenever the VPN is on. The official
   client shares one FCM socket across the whole device and lets the process be frozen.
+- **No notifications while the VPN is off.** Telegram's push server sends FCM messages only to the
+  official app, so a fork never receives them. pelegram gets new messages over tgnet's own push
+  connection instead, kept alive by a foreground service, and both run only while the VPN is on.
+  With the VPN off, Android freezes the app in the background, and new messages appear when the app
+  is opened. This is deliberate: holding the connection and a permanent notification open without
+  the VPN would cost battery for every user.
 - **The VPN overwrites the user's "Background Connection" setting.** `updateBackgroundKeepAlive()`
   writes `pushConnection` on every VPN enable, disable and select, so a user who turns Background
   Connection off in Notifications settings gets it turned back on. The fork needs that connection
